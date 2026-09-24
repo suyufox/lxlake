@@ -23,7 +23,7 @@ use lxlake::core::input::{InputSource, IntentState, Key, Keymap, MouseButton};
 use lxlake::core::widget::{Anchor, UiId, Widget};
 use lxlake::core::window::WindowDesc;
 use lxlake::render::Renderer;
-use lxlake::runtime::{App, AppContext, Frame, JobPool};
+use lxlake::runtime::{App, AppContext, Capabilities, Frame};
 use lxlake::ui::{Quad, TextShaper, TextStyle, UiTree};
 use lxlake::world::block::{BlockDef, BlockId, BlockPalette, BlockRegistry, FaceTiles};
 use lxlake::world::chunk::ChunkPos;
@@ -31,7 +31,6 @@ use lxlake::world::collision::sweep;
 use lxlake::world::raycast::raycast;
 use lxlake::world::terrain::{ISLAND_MAX_CHUNK_Y, ISLAND_MIN_CHUNK_Y, IslandGenerator};
 use lxlake::world::{Aabb, ChunkStreamer, StreamBounds, StreamOutput, World};
-use std::sync::Arc;
 use std::time::Duration;
 
 /// 帧率汇总周期。
@@ -133,10 +132,7 @@ fn camera_input(intents: &IntentState) -> CameraInput {
 struct Demo {
   world: World,
   streamer: ChunkStreamer,
-  /// 作业池要拿运行时的 [`lxlake::runtime::Wakeup`]，因此只能在 `on_startup` 里建。
-  pool: Option<JobPool>,
   camera: FlyCamera,
-  renderer: Option<Renderer>,
   /// 流式产出：每帧复用同一块缓冲，避免逐帧分配。
   output: StreamOutput,
   /// 默认键位表（应用声明的那一层）。
@@ -149,8 +145,6 @@ struct Demo {
   place_block: BlockId,
   /// 本帧累计的鼠标位移，`on_frame` 里消费掉。
   look: [f32; 2],
-  /// HUD：排版器（持有字体与字形缓存）。字体读不到时为 `None`，HUD 整块不画。
-  shaper: Option<TextShaper>,
   /// HUD 的 Widget 树。每帧重建，命中测试（输入闸口）用的就是它。
   tree: UiTree,
   /// 光标在窗口里的位置（逻辑像素）。命中测试要它——带位置的只有 `CursorMoved` 那一类事件。
@@ -202,16 +196,13 @@ impl Demo {
     Self {
       world: World::new(registry),
       streamer: ChunkStreamer::new(bounds, IslandGenerator::new(SEED, palette)),
-      pool: None,
       camera,
-      renderer: None,
       output: StreamOutput::default(),
       keymap: default_keymap(),
       intents: IntentState::new(),
       commands: Vec::new(),
       place_block: palette.grass,
       look: [0.0, 0.0],
-      shaper: None,
       tree: UiTree::new(),
       cursor: LogicalPosition::new(0.0, 0.0),
       panel_open: false,
@@ -256,17 +247,15 @@ impl Demo {
   }
 
   /// 每秒把帧率与流式进度写到标题栏。
-  fn report(&mut self, cx: &AppContext, frame: Frame) {
+  ///
+  /// `uploaded`（GPU 上的区块数）由调用方递进来：渲染器住在能力里，不从自己身上取。
+  fn report(&mut self, cx: &AppContext, frame: Frame, uploaded: usize) {
     let since = frame.elapsed.saturating_sub(self.last_report);
     if since < REPORT_INTERVAL {
       return;
     }
 
     let fps = f64::from(self.frames) / since.as_secs_f64();
-    let uploaded = self
-      .renderer
-      .as_ref()
-      .map_or(0, |renderer| renderer.uploaded_chunks());
     self.frames = 0;
     self.last_report = frame.elapsed;
 
@@ -290,16 +279,21 @@ impl Demo {
   /// `ui_owns_click`）。
   ///
   /// `scale_factor` 只参与字形光栅化：字按物理分辨率画得清楚，矩形仍旧是逻辑像素（见 `ui::text`）。
-  fn build_hud(&mut self, viewport: LogicalSize, scale_factor: f64) -> Vec<Quad> {
+  ///
+  /// `text` 与 `uploaded` 由调用方递进来，不从自己身上取：排版器住在 `App` 的能力里（见
+  /// [`Capabilities`]），HUD 只管排版，不再管字体的来路。
+  fn build_hud(
+    &mut self,
+    text: Option<&mut TextShaper>,
+    viewport: LogicalSize,
+    scale_factor: f64,
+    uploaded: usize,
+  ) -> Vec<Quad> {
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
       return Vec::new();
     }
 
     // 面板的尺寸要先量出来（见下），所以文本得在借用排版器之前凑齐。
-    let uploaded = self
-      .renderer
-      .as_ref()
-      .map_or(0, |renderer| renderer.uploaded_chunks());
     let info = hud_lines(
       self.fps,
       uploaded,
@@ -312,7 +306,7 @@ impl Demo {
       Vec::new()
     };
 
-    let Some(shaper) = self.shaper.as_mut() else {
+    let Some(shaper) = text else {
       // 字体没读进来：HUD 整块不画（启动时已经报过原因）。
       return Vec::new();
     };
@@ -394,31 +388,17 @@ impl Demo {
 }
 
 impl Demo {
-  fn startup(&mut self, cx: &mut AppContext) {
-    self.pool = Some(JobPool::with_workers(Self::worker_count(), cx.wakeup()));
-
-    // HUD 的字体在这里读：8MB 的 CJK 字库不进二进制，走发行物的 `data/`（见 `HUD_FONT`）。
-    match std::fs::read(HUD_FONT) {
-      Ok(bytes) => match TextShaper::from_bytes(bytes) {
-        Ok(shaper) => self.shaper = Some(shaper),
-        Err(error) => eprintln!("lxlake demo：HUD 字体解析失败：{error}"),
-      },
-      Err(error) => eprintln!("lxlake demo：读不到 HUD 字体 {HUD_FONT}：{error}"),
-    }
-
-    let Some(handle) = cx.main_window().map(|window| Arc::clone(window.handle())) else {
+  /// 起步：抓住光标，鼠标位移才能一直喂给视角控制。
+  ///
+  /// 作业池、字体、渲染器都不在这里建——它们的配置写在装配层（`Builder::workers` /
+  /// `font_path` / `renderer`），由运行时按配置建好，应用只管从能力里借（见 `Capabilities`）。
+  fn startup(&self, cx: &AppContext) {
+    let Some(window) = cx.main_window() else {
       eprintln!("lxlake demo：没有窗口，只跑世界不渲染");
       return;
     };
-
-    match Renderer::new(Arc::clone(&handle), &ATLAS_TILES) {
-      Ok(renderer) => self.renderer = Some(renderer),
-      Err(error) => eprintln!("lxlake demo：渲染初始化失败：{error}"),
-    }
-
-    // 抓住光标，鼠标位移才能一直喂给视角控制。
-    handle.set_cursor_grab(true);
-    handle.set_cursor_visible(false);
+    window.handle().set_cursor_grab(true);
+    window.handle().set_cursor_visible(false);
   }
 
   fn handle_event(&mut self, cx: &mut AppContext, event: &Event) {
@@ -467,20 +447,8 @@ impl Demo {
       }
       // 位置只在命中测试里用，攒着供 `MouseButton` 那一下取。
       Event::CursorMoved { position, .. } => self.cursor = *position,
-      Event::Resized { size, .. } => {
-        if let Some(renderer) = &mut self.renderer {
-          renderer.resize(*size);
-        }
-      }
-      // 换显示器 / 改系统缩放：自绘 UI 的方片是逻辑像素，渲染侧得知道新的换算比例。
-      Event::ScaleFactorChanged {
-        scale_factor, size, ..
-      } => {
-        if let Some(renderer) = &mut self.renderer {
-          renderer.set_scale_factor(*scale_factor);
-          renderer.resize(*size);
-        }
-      }
+      // resize 与 DPI 变化不在这里接：它们先落到该窗的渲染器上（表面重配 + 深度附件重建 +
+      // 换算比例），这是每个应用都要写一遍的样板，已经收进装配层的内建转发（见 `Builder`）。
       // 失焦就放开光标，不然切出去还锁着鼠标没法操作别的窗口；同时丢掉按住的意图，
       // 切回来不该还在往前飞。面板开着时本来就该是自由光标，两个条件一起看。
       Event::Focused { focused, .. } => {
@@ -500,7 +468,11 @@ impl Demo {
     }
   }
 
-  fn frame(&mut self, cx: &mut AppContext, frame: Frame) {
+  /// 一帧：模拟 → 流式 → HUD → 出画。
+  ///
+  /// 作业池、排版器、渲染器都由调用方从能力里递进来（见 [`Capabilities`]），本方法只管它们的
+  /// **用法**：状态推进要池子、拼 HUD 要排版器、出画要渲染器。
+  fn frame(&mut self, cx: &mut AppContext, frame: Frame, capabilities: Capabilities<'_>) {
     self.frames += 1;
     // 帧率的平滑值（标题栏那份仍是每秒的窗口平均，见 `report`）。
     let delta = frame.delta.as_secs_f32();
@@ -513,109 +485,113 @@ impl Demo {
       };
     }
 
-    if let Some(pool) = &self.pool {
-      let delta = frame.delta.as_secs_f32().min(MAX_DELTA);
-      let look = std::mem::take(&mut self.look);
+    // `text` 这一帧要借两次（先拼 HUD，再取本帧新光栅化的字形），所以绑成 `mut`、用
+    // `as_deref_mut` 逐次借出，而不是把整个 `Option` 交出去。
+    let Capabilities {
+      jobs,
+      mut text,
+      gpu,
+    } = capabilities;
+    let Some(pool) = jobs else {
+      // 流式生成全在作业池上跑（见装配层的 `workers`）：没有池子这一帧就无事可做。
+      return;
+    };
 
-      // 转向与位移分开走：位移**先过一遍碰撞夹紧**再落位，撞墙就停（见 `camera` / `collision`）。
-      self.camera.look(look);
-      let desired = self
-        .camera
-        .desired_delta(&camera_input(&self.intents), delta);
-      let allowed = sweep(
-        &self.world,
-        Aabb::new(self.camera.position(), PLAYER_HALF),
-        desired,
-      );
-      self.camera.translate(allowed);
+    let delta = frame.delta.as_secs_f32().min(MAX_DELTA);
+    let look = std::mem::take(&mut self.look);
 
-      // 意图 → 命令：动作意图在这一帧排空，解析成带坐标的命令。
-      for intent in self.intents.take_actions() {
-        match intent {
-          Intent::Quit => cx.exit(),
-          Intent::Break | Intent::Place => {
-            if let Some(command) = self.command_for(intent) {
-              self.commands.push(command);
-            }
+    // 转向与位移分开走：位移**先过一遍碰撞夹紧**再落位，撞墙就停（见 `camera` / `collision`）。
+    self.camera.look(look);
+    let desired = self
+      .camera
+      .desired_delta(&camera_input(&self.intents), delta);
+    let allowed = sweep(
+      &self.world,
+      Aabb::new(self.camera.position(), PLAYER_HALF),
+      desired,
+    );
+    self.camera.translate(allowed);
+
+    // 意图 → 命令：动作意图在这一帧排空，解析成带坐标的命令。
+    for intent in self.intents.take_actions() {
+      match intent {
+        Intent::Quit => cx.exit(),
+        Intent::Break | Intent::Place => {
+          if let Some(command) = self.command_for(intent) {
+            self.commands.push(command);
           }
-          _ => {}
         }
-      }
-
-      // 命令在帧边界、模拟之前按序应用：本帧改的方块本帧就进重算队列，画面下一帧更新。
-      // 这条序列就是 M2 验收第 4 条要的「命令流」——M4 存档与将来联机从这里接。
-      if !self.commands.is_empty() {
-        let line = self
-          .commands
-          .iter()
-          .map(Command::to_string)
-          .collect::<Vec<_>>()
-          .join(" | ");
-        println!("本帧命令：{line}");
-
-        let mut dirty = Vec::new();
-        for command in self.commands.drain(..) {
-          dirty.extend(self.world.apply(&command));
-        }
-        self.streamer.mark_dirty(&dirty);
-      }
-
-      // 流式的入口只有一个：焦点区块。相机飞过区块边界，视距内的区块才随之换一批。
-      let focus = chunk_focus(self.camera.position());
-      let streamer = &mut self.streamer;
-      let world = &mut self.world;
-      let output = &mut self.output;
-      streamer.update(world, pool, focus, output);
-
-      // HUD 在流式之后、渲染之前拼：面板上的数字要是这一帧的。
-      let (viewport, scale_factor) =
-        cx.main_window()
-          .map_or((LogicalSize::new(0.0, 0.0), 1.0), |window| {
-            let scale_factor = window.handle().scale_factor();
-            (
-              window.handle().size().to_logical(scale_factor),
-              scale_factor,
-            )
-          });
-      let quads = self.build_hud(viewport, scale_factor);
-      // 本帧新光栅化的字形交给渲染侧增量补进 UI 图集；交出即清空（见 `ui::text`）。
-      let glyphs = self
-        .shaper
-        .as_mut()
-        .map(TextShaper::take_new_glyphs)
-        .unwrap_or_default();
-
-      if let Some(renderer) = &mut self.renderer {
-        for mesh in &self.output.meshed {
-          renderer.upload(mesh);
-        }
-        for pos in &self.output.unloaded {
-          renderer.unload(*pos);
-        }
-        renderer.upload_glyphs(&glyphs);
-        if let Err(error) = renderer.render(&self.camera, &quads) {
-          eprintln!("lxlake demo：渲染失败：{error}");
-          cx.exit();
-        }
+        _ => {}
       }
     }
 
-    self.report(cx, frame);
-  }
+    // 命令在帧边界、模拟之前按序应用：本帧改的方块本帧就进重算队列，画面下一帧更新。
+    // 这条序列就是 M2 验收第 4 条要的「命令流」——M4 存档与将来联机从这里接。
+    if !self.commands.is_empty() {
+      let line = self
+        .commands
+        .iter()
+        .map(Command::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ");
+      println!("本帧命令：{line}");
 
-  fn shutdown(&mut self) {
-    // 显式放掉：GPU 资源与池都该在事件循环退出前收干净，别留给进程退出去处理。
-    self.renderer = None;
-    self.pool = None;
+      let mut dirty = Vec::new();
+      for command in self.commands.drain(..) {
+        dirty.extend(self.world.apply(&command));
+      }
+      self.streamer.mark_dirty(&dirty);
+    }
+
+    // 流式的入口只有一个：焦点区块。相机飞过区块边界，视距内的区块才随之换一批。
+    let focus = chunk_focus(self.camera.position());
+    let streamer = &mut self.streamer;
+    let world = &mut self.world;
+    let output = &mut self.output;
+    streamer.update(world, pool, focus, output);
+
+    // HUD 在流式之后、渲染之前拼：面板上的数字要是这一帧的。
+    let (viewport, scale_factor) =
+      cx.main_window()
+        .map_or((LogicalSize::new(0.0, 0.0), 1.0), |window| {
+          let scale_factor = window.handle().scale_factor();
+          (
+            window.handle().size().to_logical(scale_factor),
+            scale_factor,
+          )
+        });
+    let uploaded = gpu
+      .as_ref()
+      .map_or(0, |renderer| renderer.uploaded_chunks());
+    let quads = self.build_hud(text.as_deref_mut(), viewport, scale_factor, uploaded);
+    // 本帧新光栅化的字形交给渲染侧增量补进 UI 图集；交出即清空（见 `ui::text`）。
+    let glyphs = text.map(TextShaper::take_new_glyphs).unwrap_or_default();
+
+    if let Some(renderer) = gpu {
+      for mesh in &self.output.meshed {
+        renderer.upload(mesh);
+      }
+      for pos in &self.output.unloaded {
+        renderer.unload(*pos);
+      }
+      renderer.upload_glyphs(&glyphs);
+      if let Err(error) = renderer.render(&self.camera, &quads) {
+        eprintln!("lxlake demo：渲染失败：{error}");
+        cx.exit();
+      }
+    }
+
+    self.report(cx, frame, uploaded);
   }
 }
 
 /// 生命周期：装配层（[`Builder`](lxlake::Builder)）把钩子交给下面这几个自由函数，
 /// 每个钩子从托管状态里取出 [`Demo`]，再交给它自己的方法。
 ///
-/// 状态与上下文**同时**要用的地方走 [`App::with_state`]（状态临时取出，两个借用互不相干）。
+/// 状态与上下文**同时**要用的地方走 [`App::with_state`]（状态临时取出，两个借用互不相干）；
+/// 状态、能力、上下文**三者**都要的地方走 [`App::with_capabilities`]（帧就是这样）。
 fn on_startup(app: &mut App) {
-  app.with_state::<Demo, _>(Demo::startup);
+  app.with_state::<Demo, _>(|demo, cx| demo.startup(cx));
 }
 
 fn on_event(app: &mut App, event: &Event) {
@@ -623,11 +599,7 @@ fn on_event(app: &mut App, event: &Event) {
 }
 
 fn on_frame(app: &mut App, frame: Frame) {
-  app.with_state::<Demo, _>(|demo, cx| demo.frame(cx, frame));
-}
-
-fn on_shutdown(app: &mut App) {
-  app.with_state::<Demo, _>(|demo, _| demo.shutdown());
+  app.with_capabilities::<Demo, _>(|demo, capabilities, cx| demo.frame(cx, frame, capabilities));
 }
 
 /// 世界坐标 → 区块坐标（焦点）。用欧几里得除法换算，负坐标才不会偏一格。
@@ -732,6 +704,9 @@ fn push_panel_quads(
 }
 
 /// 应用入口：`#[lxlake::entry]` 只标**装配**这一层——函数块的值就是装配好的应用。
+///
+/// 作业池、字体、渲染器都在这儿声明，不在应用体内建：它们是**引擎能力**（见
+/// `Capabilities`），装配层说清「要什么」，运行时按配置建好并从能力里借出去。
 #[lxlake::entry]
 fn main() -> lxlake::Builder {
   lxlake::Builder::new()
@@ -740,11 +715,13 @@ fn main() -> lxlake::Builder {
       size: LogicalSize::new(1280.0, 720.0),
       ..WindowDesc::default()
     })
+    .workers(Demo::worker_count())
+    .font_path(HUD_FONT)
+    .renderer(|window| Renderer::new(window, &ATLAS_TILES))
     .manage(Demo::new())
     .on_startup(on_startup)
     .on_event(on_event)
     .on_frame(on_frame)
-    .on_shutdown(on_shutdown)
 }
 
 #[cfg(test)]
@@ -762,12 +739,13 @@ mod tests {
   );
 
   /// 建一个装了字体的 Demo（字体是 HUD 的前提，没有就没有可测的布局）。
-  fn demo_with_font() -> Option<Demo> {
+  ///
+  /// 排版器单独交出来：运行期它在 `App` 的能力里（见 [`Capabilities`]），测试里没有那层，
+  /// 直接拿在手上当能力递进 [`Demo::build_hud`]。
+  fn demo_with_font() -> Option<(Demo, TextShaper)> {
     let bytes = std::fs::read(FONT_PATH).ok()?;
     let shaper = TextShaper::from_bytes(bytes).ok()?;
-    let mut demo = Demo::new();
-    demo.shaper = Some(shaper);
-    Some(demo)
+    Some((Demo::new(), shaper))
   }
 
   #[test]
@@ -804,7 +782,7 @@ mod tests {
 
   #[test]
   fn the_panel_is_sized_around_its_widest_line() {
-    let Some(shaper) = demo_with_font().and_then(|demo| demo.shaper) else {
+    let Some((_, shaper)) = demo_with_font() else {
       return; // 没有字体资产就不测：HUD 本身也画不出来。
     };
 
@@ -828,13 +806,13 @@ mod tests {
   /// 闸口真正的凭据：面板开着时正中那一下落在**面板**上，不是准星上。
   #[test]
   fn the_open_panel_covers_the_crosshair_at_the_center() {
-    let Some(mut demo) = demo_with_font() else {
+    let Some((mut demo, mut shaper)) = demo_with_font() else {
       return;
     };
     let viewport = LogicalSize::new(1000.0, 600.0);
     let center = LogicalPosition::new(500.0, 300.0);
 
-    demo.build_hud(viewport, 1.0);
+    demo.build_hud(Some(&mut shaper), viewport, 1.0, 0);
     assert!(!ui_owns_click(demo.panel_open, &demo.tree, center));
     assert_eq!(
       demo.tree.hit_test(center),
@@ -843,7 +821,7 @@ mod tests {
     );
 
     demo.panel_open = true;
-    demo.build_hud(viewport, 1.0);
+    demo.build_hud(Some(&mut shaper), viewport, 1.0, 0);
     assert_eq!(
       demo.tree.hit_test(center),
       Some(HUD_HELP_ID),

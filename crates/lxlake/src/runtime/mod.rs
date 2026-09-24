@@ -16,8 +16,8 @@ mod jobs;
 mod pump;
 mod window;
 
-pub use app::{App, AppContext};
-pub use builder::Builder;
+pub use app::{App, AppContext, Capabilities};
+pub use builder::{Builder, Plugin};
 pub use clock::{Frame, FrameClock};
 pub use jobs::{JobContext, JobHandle, JobPool};
 pub use pump::{EventSource, PumpContext, Wakeup};

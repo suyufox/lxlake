@@ -6,9 +6,13 @@
 //!
 //! 平台侧不认识 [`App`]，它只认 [`Application`](super::Application)。
 
+use super::jobs::JobPool;
 use super::pump::{EventSource, PumpContext, Wakeup};
 use super::window::{Window, WindowRegistry};
 use crate::core::window::{WindowHandle, WindowId, WindowLabel};
+#[cfg(feature = "render")]
+use crate::render::Renderer;
+use crate::ui::TextShaper;
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -155,7 +159,21 @@ impl AppContext {
   }
 }
 
-/// 应用：托管状态 + 上下文。
+/// 能力视图：装配期按配置建好、运行期借给应用的那几样东西。
+///
+/// 与 [`App::with_capabilities`] 配套——状态、能力、上下文三者要**同时**用到时走它（帧里几乎
+/// 总是如此：状态推进要作业池、拼 HUD 要排版器、出画要渲染器）。
+pub struct Capabilities<'a> {
+  /// 作业池：`Builder::workers` 配过才有。
+  pub jobs: Option<&'a JobPool>,
+  /// 文本排版器：`Builder::font_path` / `Builder::font_bytes` 配过、且字体读得进来才有。
+  pub text: Option<&'a mut TextShaper>,
+  /// **主窗口**的渲染器：`Builder::renderer` 配过才有。
+  #[cfg(feature = "render")]
+  pub gpu: Option<&'a mut Renderer>,
+}
+
+/// 应用：托管状态 + 上下文 + 能力。
 ///
 /// 生命周期闭包拿到的就是它。状态一律经 [`App::manage`] 登记、按类型取回——应用自己的类型由
 /// 应用定义，框架不规定它的形状。
@@ -163,6 +181,13 @@ pub struct App {
   cx: AppContext,
   /// 托管状态：按类型存一份。生命周期闭包跨帧访问同一份状态就走这里。
   managed: BTreeMap<TypeId, Box<dyn Any + Send + Sync>>,
+  /// 作业池：装配期按 `Builder::workers` 建，运行期只读借出。
+  jobs: Option<JobPool>,
+  /// 文本排版器：装配期按字体配置建，运行期可变借出（排版会往字形缓存里塞东西）。
+  text: Option<TextShaper>,
+  /// 渲染器：**按窗一份**，窗口建好时惰建（见 `Builder::renderer`）。
+  #[cfg(feature = "render")]
+  gpu: BTreeMap<WindowId, Renderer>,
 }
 
 impl App {
@@ -170,6 +195,10 @@ impl App {
     Self {
       cx: AppContext::new(),
       managed: BTreeMap::new(),
+      jobs: None,
+      text: None,
+      #[cfg(feature = "render")]
+      gpu: BTreeMap::new(),
     }
   }
 
@@ -264,6 +293,78 @@ impl App {
     );
     self.managed.insert(TypeId::of::<T>(), state);
     Some(result)
+  }
+
+  /// **同时**取托管状态、能力与上下文。
+  ///
+  /// 状态仍是「临时取出」那一套（见 [`App::with_state`]）；能力是 `App` 的另外几个字段，与状态、
+  /// 上下文各不相干，所以能与它们一起借出。
+  ///
+  /// 借出的渲染器是**主窗口**那一份（多窗口各自的渲染器见 `App::gpu`）。
+  pub fn with_capabilities<T: Any + Send + Sync, R>(
+    &mut self,
+    f: impl FnOnce(&mut T, Capabilities<'_>, &mut AppContext) -> R,
+  ) -> Option<R> {
+    let mut state = self.managed.remove(&TypeId::of::<T>())?;
+    // 渲染器按主窗口取：上面那句文档说的就是这个 `main`。
+    #[cfg(feature = "render")]
+    let main = self.cx.main_window().map(|window| window.id());
+    let capabilities = Capabilities {
+      jobs: self.jobs.as_ref(),
+      text: self.text.as_mut(),
+      #[cfg(feature = "render")]
+      gpu: main.and_then(|id| self.gpu.get_mut(&id)),
+    };
+    let result = f(
+      state.downcast_mut::<T>().expect("托管状态的键与值类型一致"),
+      capabilities,
+      &mut self.cx,
+    );
+    self.managed.insert(TypeId::of::<T>(), state);
+    Some(result)
+  }
+
+  /// 某个窗口的平台句柄（运行时内部用：建渲染器）。
+  #[cfg(feature = "render")]
+  pub(crate) fn window_handle(&self, id: WindowId) -> Option<Arc<dyn WindowHandle>> {
+    self
+      .cx
+      .window_by_id(id)
+      .map(|window| Arc::clone(window.handle()))
+  }
+
+  /// 某个窗口的渲染器。
+  #[cfg(feature = "render")]
+  pub(crate) fn gpu_mut(&mut self, id: WindowId) -> Option<&mut Renderer> {
+    self.gpu.get_mut(&id)
+  }
+
+  /// 装作业池（装配期调一次）。
+  pub(crate) fn set_jobs(&mut self, pool: JobPool) {
+    self.jobs = Some(pool);
+  }
+
+  /// 装排版器（装配期调一次）。
+  pub(crate) fn set_text(&mut self, shaper: TextShaper) {
+    self.text = Some(shaper);
+  }
+
+  /// 某个窗口的渲染器建好了。同一窗口再建即覆盖（旧的先释放，表面不会挂着两个）。
+  #[cfg(feature = "render")]
+  pub(crate) fn insert_gpu(&mut self, id: WindowId, renderer: Renderer) {
+    self.gpu.insert(id, renderer);
+  }
+
+  /// 收回某个窗口的渲染器：窗口没了，表面必须跟着放掉。
+  #[cfg(feature = "render")]
+  pub(crate) fn remove_gpu(&mut self, id: WindowId) {
+    self.gpu.remove(&id);
+  }
+
+  /// 收回全部渲染器。生命周期末尾调（表面挂窗口句柄，要在窗口之前放）。
+  #[cfg(feature = "render")]
+  pub(crate) fn clear_gpu(&mut self) {
+    self.gpu.clear();
   }
 }
 
@@ -491,6 +592,39 @@ mod tests {
     assert!(app.exit_requested(), "闭包里的退出请求落在同一个上下文上");
     assert_eq!(
       app.with_state::<u32, _>(|_, _| ()),
+      None,
+      "没登记过就是 None"
+    );
+  }
+
+  /// 能力与状态、上下文能**一起**借出——帧里这三样总是同时要用。
+  #[test]
+  fn capabilities_come_out_alongside_state_and_context() {
+    #[derive(Default)]
+    struct Demo {
+      frames: u32,
+    }
+
+    let mut app = App::new();
+    app.manage(Demo::default());
+    app.set_jobs(JobPool::with_workers(
+      1,
+      Arc::new(NoopWakeup) as Arc<dyn Wakeup>,
+    ));
+
+    let seen = app.with_capabilities::<Demo, _>(|demo, capabilities, cx| {
+      demo.frames += 1;
+      assert!(capabilities.jobs.is_some(), "装了作业池就该借得到");
+      assert!(capabilities.text.is_none(), "没装排版器就是 None");
+      cx.exit();
+      demo.frames
+    });
+
+    assert_eq!(seen, Some(1));
+    assert_eq!(app.get::<Demo>().map(|demo| demo.frames), Some(1));
+    assert!(app.exit_requested(), "闭包里的退出请求落在同一个上下文上");
+    assert_eq!(
+      app.with_capabilities::<u32, _>(|_, _, _| ()),
       None,
       "没登记过就是 None"
     );
