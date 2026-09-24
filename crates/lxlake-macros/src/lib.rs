@@ -7,8 +7,11 @@
 //!
 //! - `pub fn run()`：桌面入口，由同包 `main.rs` 的 `fn main()` 调一行；
 //! - `#[unsafe(no_mangle)] extern "C" fn android_main(..)`：Android 入口，由 activity 按符号
-//!   加载。整体被 `#[cfg(target_os = "android")]` 门控，**桌面构建下这段代码不参与解析**，
-//!   所以即使 `lxlake::AndroidApp` / `runtime::run_android` 尚未实装，也编译得过。
+//!   加载。
+//!
+//! 两个入口**互为 `cfg` 门控**：桌面构建下 android 那段不参与解析（所以 `lxlake::AndroidApp`
+//! / `lxlake::runtime::run_android` 在桌面不存在也不影响编译），android 构建下 `run()` 同样不
+//! 参与（那边唯一的入口是 `android_main`，`fn main` 与它无关）。
 //!
 //! 两者共用同一份装配（同一个工厂函数），主程序不必写任何平台分支。
 
@@ -89,10 +92,9 @@ fn expand_entry(item: TokenStream, desktop: bool, mobile: bool) -> TokenStream {
 
   let name = factory.sig.ident.clone();
 
-  // 仅移动端：桌面构建下工厂函数不会被任何代码引用，补一行避免死代码告警。
-  if mobile && !desktop {
-    factory.attrs.push(parse_quote!(#[allow(dead_code)]));
-  }
+  // 工厂函数被谁引用**取决于目标平台**（android 走 `android_main`、桌面走 `run()`，另一端被
+  // `cfg` 门控掉），所以一律补 `#[allow(dead_code)]`——免得「没被引用」的那一端冒出无害告警。
+  factory.attrs.push(parse_quote!(#[allow(dead_code)]));
 
   let mut generated = quote! { #factory };
 
@@ -102,9 +104,12 @@ fn expand_entry(item: TokenStream, desktop: bool, mobile: bool) -> TokenStream {
 
       /// 桌面入口：装配应用并交给运行时，阻塞至退出。
       ///
-      /// 由同包 `main.rs` 的 `fn main()` 调用。
+      /// 由同包 `main.rs` 的 `fn main()` 调用。android 构建下不存在——那边唯一的入口是
+      /// `android_main`。
+      #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
       pub fn run() {
-        if let Err(err) = ::lxlake::runtime::run(#name()) {
+        // 走 `Builder::run` 而不是 `runtime::run`：插件要在这条路上被应用（见 `Builder::apply_plugins`）。
+        if let Err(err) = #name().run() {
           eprintln!("lxlake: {err}");
           std::process::exit(1);
         }
@@ -120,7 +125,8 @@ fn expand_entry(item: TokenStream, desktop: bool, mobile: bool) -> TokenStream {
       #[cfg(target_os = "android")]
       #[unsafe(no_mangle)]
       pub extern "C" fn android_main(__lxlake_app: ::lxlake::AndroidApp) {
-        if let Err(err) = ::lxlake::runtime::run_android(__lxlake_app, #name()) {
+        // 与桌面那条对称：都走 `Builder` 上的入口，插件因此在两端都被应用。
+        if let Err(err) = #name().run_android(__lxlake_app) {
           eprintln!("lxlake: {err}");
           std::process::exit(1);
         }

@@ -89,9 +89,26 @@ pub trait Application: 'static {
 }
 
 /// 启动应用：先校验装配期配置（窗口标签），再把控制权交给平台后端的事件循环，返回时应用已退出。
+///
+/// 只有桌面有「无参入口」这件事——android 上事件循环要靠系统递进来的 activity 才建得起来，
+/// 走 [`run_android`]（见 `platform::winit`）。
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub fn run(app: impl Application) -> Result<(), Error> {
   validate_windows(&app.windows())?;
   platform::run(app)
+}
+
+/// android 入口：与 [`run`] 走同一道闸、同一条路，只多一个系统递进来的应用句柄。
+///
+/// 应用不该自己调它——`#[lxlake::entry]` 生成的 `android_main` 已经接好了（见 `lxlake_macros`）。
+/// 与 [`run`] 一样先校验窗口声明：平台入口只负责跑，配置的正确性在这一层判。
+#[cfg(target_os = "android")]
+pub fn run_android(
+  android_app: crate::platform::AndroidApp,
+  app: impl Application,
+) -> Result<(), Error> {
+  validate_windows(&app.windows())?;
+  platform::run_android(android_app, app)
 }
 
 /// 校验窗口声明：标签非空、互不重复，且保留标签 `main` 只归主窗口（列表首位那个）。

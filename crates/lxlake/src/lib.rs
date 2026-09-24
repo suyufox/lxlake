@@ -34,6 +34,17 @@ pub mod render;
 /// 应用装配器：`Builder::new().window(..).manage(..).on_frame(..)`。
 pub use runtime::Builder;
 
+/// android 的应用句柄：由 winit 再导出（**不是**框架自造的包装），`android_main` 收的就是它。
+///
+/// 走这条再导出，框架主线不必直接依赖 `android-activity` / `ndk` / `jni`——android 入口要的
+/// 那一件东西，winit 已经有了。桌面构建下没有这个类型（见 [`runtime::run_android`]）。
+#[cfg(target_os = "android")]
+pub use platform::AndroidApp;
+
+/// android 入口：由 `#[lxlake::entry]` 生成的 `android_main` 调用，应用不必自己写。
+#[cfg(target_os = "android")]
+pub use runtime::run_android;
+
 /// 应用入口宏族。
 ///
 /// - [`entry`](macro@entry)：标在**工厂函数**上，同时产出桌面 `run()` 与 Android `android_main`；

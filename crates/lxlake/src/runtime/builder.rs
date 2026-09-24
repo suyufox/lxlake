@@ -230,8 +230,21 @@ impl Builder {
   }
 
   /// 跑起来，阻塞至应用退出。
+  ///
+  /// 桌面专有：android 的事件循环要靠系统递进来的 activity 才建得起来，那边走
+  /// [`Builder::run_android`]。
+  #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
   pub fn run(self) -> Result<(), Error> {
     super::run(self.apply_plugins())
+  }
+
+  /// android 版 [`Builder::run`]：多一件系统递进来的 activity。
+  ///
+  /// 插件照桌面那条路在**进入运行时之前**应用——两条入口走同一份装配，只是事件循环的来路不同。
+  /// 由 `#[lxlake::entry]` 生成的 `android_main` 调用。
+  #[cfg(target_os = "android")]
+  pub fn run_android(self, android_app: crate::platform::AndroidApp) -> Result<(), Error> {
+    super::run_android(android_app, self.apply_plugins())
   }
 
   /// 应用插件：按加入顺序依次改写装配。

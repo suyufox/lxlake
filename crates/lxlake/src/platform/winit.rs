@@ -1,7 +1,12 @@
-//! winit 驱动的桌面后端（windows / linux / macos）。
+//! winit 驱动的后端（windows / linux / macos / android）。
 //!
 //! 职责边界：本文件是**唯一**碰 winit 的地方（`core` 与 `runtime` 都不认识 winit）。
 //! 它做三件事——建窗、把原生事件翻译成 [`Event`]、驱动 [`Application`] 的帧钩子。
+//!
+//! android 与桌面走**同一套**事件循环与窗口抽象，差别只有三处，都在本文件里收口：
+//! 入口多一个系统递进来的 [`AndroidApp`]（沙箱根由它给）、`resumed` 会反复来（切后台再
+//! 回前台 = 一次新的 `InitWindow`）、`suspended` 要把窗口整体摘掉（surface 已被系统销毁）。
+//! 因此不需要为 android 单独写一个后端——winit 自己就是那个后端。
 
 use crate::core::Error;
 use crate::core::event::Event;
@@ -21,6 +26,13 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId as WinitWindowId};
+
+/// 由 crate 根再导出的 android 应用句柄（winit 自己从 `android-activity` 转出）。
+///
+/// 走这条再导出，框架就不必直接依赖 `android-activity` / `ndk` / `jni`:android 入口要的
+/// 那一件东西，winit 这里已经有了。
+#[cfg(target_os = "android")]
+pub use winit::platform::android::activity::AndroidApp;
 
 /// 事件循环的用户事件：唯一用途是跨线程唤醒——把运行时的等待打断，让它立刻泵一遍。
 enum UserEvent {
@@ -84,7 +96,8 @@ impl WindowHandle for DesktopWindow {
       CursorGrabMode::None
     };
     if let Err(err) = self.window.set_cursor_grab(mode) {
-      eprintln!("lxlake: 光标抓取失败：{err}");
+      // android 上必然失败（后端返回 `NotSupported`），那不是错误，是平台差异。
+      tracing::debug!("光标抓取不可用：{err}");
     }
   }
 
@@ -100,8 +113,11 @@ struct Driver<A: Application> {
   /// 窗口翻译表：平台 id → 契约 id。窗口本体由 [`AppContext`](crate::runtime::AppContext) 持有。
   window_ids: Vec<(WinitWindowId, WindowId)>,
   next_window_id: u64,
-  /// 已进入 `resumed`：桌面端要等第一次 resume 才允许建窗。
-  started: bool,
+  /// 已跑过一次「一次性启动」：装设备事件监听 + `on_startup`。
+  ///
+  /// 与「建窗」分开记：android 上 `resumed` 会反复来（切后台再回前台），一次性的事只该做一次，
+  /// 而窗口每次回来都得重建。
+  started_once: bool,
   /// 「立刻补一帧」：resize / DPI 变化 / 事件源报了待处理时置上。
   frame_pending: bool,
 }
@@ -116,7 +132,7 @@ impl<A: Application> Driver<A> {
       clock,
       window_ids: Vec::new(),
       next_window_id: 0,
-      started: false,
+      started_once: false,
       frame_pending: false,
     }
   }
@@ -204,15 +220,30 @@ impl<A: Application> Driver<A> {
 
 impl<A: Application> ApplicationHandler<UserEvent> for Driver<A> {
   fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-    if self.started {
-      return;
+    if !self.started_once {
+      self.started_once = true;
+      // 原始鼠标位移是设备级事件，得显式声明要。只在窗口有焦点时要——后台不必收。
+      // （android 后端对这条是空实现，无需分档。）
+      event_loop.listen_device_events(DeviceEvents::WhenFocused);
+      self.app.on_startup();
     }
-    self.started = true;
-    // 原始鼠标位移是设备级事件，得显式声明要。只在窗口有焦点时要——后台不必收。
-    event_loop.listen_device_events(DeviceEvents::WhenFocused);
-    self.create_windows(event_loop);
-    self.app.on_startup();
+    // 建窗按「注册表空不空」判定，而不是「第几次 resume」：android 每次回前台都是一次新的
+    // `InitWindow`，而窗口在 `suspended` 时已被摘掉——照「只建一次」的写法，回到前台就没有窗口了。
+    if self.app.context_mut().window_count() == 0 {
+      self.create_windows(event_loop);
+    }
     self.frame_pending = true;
+  }
+
+  /// android：切到后台。系统会销毁 surface，渲染目标随之失效，所以窗口**整体摘掉**、回来时重建。
+  ///
+  /// 桌面端不会收到这个回调，本方法对桌面语义为零。
+  #[cfg(target_os = "android")]
+  fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+    let ids: Vec<WindowId> = self.window_ids.iter().map(|(_, id)| *id).collect();
+    for id in ids {
+      self.destroy_window(id);
+    }
   }
 
   fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
@@ -360,22 +391,54 @@ impl<A: Application> ApplicationHandler<UserEvent> for Driver<A> {
 }
 
 /// 跑事件循环，阻塞至应用退出。
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub(crate) fn run<A: Application>(app: A) -> Result<(), Error> {
-  // 路径先装：应用目录由应用的标识定，之后所有目录判断都走 `crate::path` 这一处
-  //（日志的默认落点也靠它）。装在这里是因为入口才知道自己是哪个平台、根在哪。
   crate::path::install(crate::path::Paths::for_app(app.app_id()));
-  // 日志紧跟路径、且在建事件循环之前：默认落点在应用目录下，此刻才解析得出来；
-  // 而窗口与渲染后端初始化阶段的日志也该被捕获（见 runtime::log 的数据与安装分离）。
-  if let Some(config) = app.log_config()
-    && let Err(error) = config.install()
-  {
-    eprintln!("lxlake: {error}");
-  }
+  install_log(&app);
 
   let event_loop = EventLoop::<UserEvent>::with_user_event()
     .build()
     .map_err(|err| Error::Platform(format!("创建事件循环失败：{err}")))?;
 
+  drive(app, event_loop)
+}
+
+/// android 入口：与 [`run`] 同一套驱动，只多一步「把系统递进来的 activity 交给 winit」。
+///
+/// 应用目录也由它定：android 的沙箱根只有系统知道（`internal_data_path`），拿不到就退回
+/// 应用的临时目录兜底（见 [`crate::path::Paths::for_android`]）。
+#[cfg(target_os = "android")]
+pub(crate) fn run_android<A: Application>(android_app: AndroidApp, app: A) -> Result<(), Error> {
+  use winit::platform::android::EventLoopBuilderExtAndroid;
+
+  crate::path::install(crate::path::Paths::for_android(
+    android_app.internal_data_path(),
+  ));
+  install_log(&app);
+
+  let event_loop = EventLoop::<UserEvent>::with_user_event()
+    .with_android_app(android_app)
+    .build()
+    .map_err(|err| Error::Platform(format!("创建事件循环失败：{err}")))?;
+
+  drive(app, event_loop)
+}
+
+/// 路径之后紧跟日志，且都在建事件循环之前。
+///
+/// 顺序是硬的：默认落点在应用目录下，此刻才解析得出来（见 `runtime::log` 的数据与安装分离）；
+/// 而窗口与渲染后端初始化阶段的日志也该被捕获。平台是唯一知道「自己在哪个平台、根在哪」的
+/// 一层，所以由它装，而不是由 `Builder::run` 装。
+fn install_log<A: Application>(app: &A) {
+  if let Some(config) = app.log_config()
+    && let Err(error) = config.install()
+  {
+    eprintln!("lxlake: {error}");
+  }
+}
+
+/// 建驱动器、跑循环、收尾。桌面与 android 只差上面那个 [`EventLoop`] 是怎么建的。
+fn drive<A: Application>(app: A, event_loop: EventLoop<UserEvent>) -> Result<(), Error> {
   let proxy = event_loop.create_proxy();
   let mut driver = Driver::new(app, proxy);
 

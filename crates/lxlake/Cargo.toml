@@ -14,6 +14,8 @@ lxlake-macros = { workspace = true }
 
 # 基础依赖：开窗是框架主线（runtime + platform）的能力，不属于 render。
 # 不开 render 的空窗口也必须能跑，故 winit 不是 optional。
+# android 的后端由 winit 自己带（`android-game-activity`，见文末的 target 分档），而
+# `AndroidApp` 也由 winit 再导出，因此不直接依赖 android-activity / ndk / jni。
 winit = "0.30.13"
 
 # 渲染（M1 起实装）：全部落在 render 特性之后。
@@ -50,3 +52,9 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync"] }
 [features]
 default = []
 render = ["dep:wgpu", "dep:naga", "dep:bytemuck"]
+
+# 目标分档：android 的后端（activity 生命周期、surface）由 winit 自带的 `android-game-activity`
+# 特性提供。平台后端分档一律走 `cfg(target_os)`，不用 feature（见 docs/architecture.md）——
+# 这里加的也是**依赖特性**，不是框架 feature。
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30.13", features = ["android-game-activity"] }
