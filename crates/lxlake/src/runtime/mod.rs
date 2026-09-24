@@ -1,12 +1,14 @@
-//! 运行时：`App` 契约、帧循环、外部事件源泵。
+//! 运行时：`App` 契约、帧循环、外部事件源泵、作业调度。
 //!
 //! **等待权在本层与平台手里**：帧节奏由 [`FrameClock`] 定，外部事件源按自己声明的截止
 //! 时间被泵。任何异步机制都不得与之争抢等待（见 `docs/architecture.md` 任务与异步）。
 
 mod clock;
+mod jobs;
 mod pump;
 
 pub use clock::{Frame, FrameClock};
+pub use jobs::{JobContext, JobHandle, JobPool};
 pub use pump::{EventSource, PumpContext, Wakeup};
 
 use crate::core::Error;
