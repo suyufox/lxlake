@@ -7,6 +7,7 @@
 //! - [`core`] —— 契约：事件、几何、窗口、Widget 的数据与 trait。**硬约束：不出现 winit / wgpu 类型**
 //! - [`runtime`] —— 装配（[`Builder`]）、帧循环、[`App`](runtime::App)、外部事件源泵、作业池
 //! - `platform` —— 平台后端，按 `cfg(target_os)` 分档；应用代码不该碰它，用 [`runtime::run`] 即可
+//! - [`path`] —— 系统目录与应用目录的**唯一判断处**（[`Paths`](path::Paths) + [`BaseDirectory`](path::BaseDirectory)）
 //! - [`world`] —— 体素世界：方块注册表、区块、浮岛生成、区块流式
 //! - [`meshing`] —— 区块 → 网格（纯 CPU，POD 顶点）
 //! - [`camera`] —— 自由飞行相机
@@ -21,6 +22,7 @@
 pub mod camera;
 pub mod core;
 pub mod meshing;
+pub mod path;
 mod platform;
 pub mod runtime;
 pub mod ui;

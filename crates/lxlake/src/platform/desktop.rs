@@ -354,6 +354,10 @@ impl<A: Application> ApplicationHandler<UserEvent> for Driver<A> {
 
 /// 跑事件循环，阻塞至应用退出。
 pub(crate) fn run<A: Application>(app: A) -> Result<(), Error> {
+  // 路径先装：应用目录由应用的标识定，之后所有目录判断都走 `crate::path` 这一处
+  //（日志的默认落点也靠它）。装在这里是因为入口才知道自己是哪个平台、根在哪。
+  crate::path::install(crate::path::Paths::for_app(app.app_id()));
+
   let event_loop = EventLoop::<UserEvent>::with_user_event()
     .build()
     .map_err(|err| Error::Platform(format!("创建事件循环失败：{err}")))?;

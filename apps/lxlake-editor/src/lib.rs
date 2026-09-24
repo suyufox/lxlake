@@ -18,6 +18,7 @@ struct Editor;
 #[lxlake::entry]
 fn app() -> lxlake::Builder {
   lxlake::Builder::new()
+    .app_id("com.lxlake.editor")
     .main_window(WindowDesc {
       title: "lxlake editor".to_owned(),
       ..WindowDesc::default()

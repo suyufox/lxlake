@@ -47,6 +47,10 @@ pub trait Application: 'static {
   /// 运行时 / 平台要用的上下文。
   fn context_mut(&mut self) -> &mut AppContext;
 
+  /// 应用标识。平台入口据此算应用目录（见 [`crate::path::Paths::for_app`]），
+  /// 日志的默认落点也由它定。
+  fn app_id(&self) -> &str;
+
   /// 启动时要创建的窗口。标签为 `main` 的那个即主窗口。
   fn windows(&self) -> Vec<WindowSpec>;
 

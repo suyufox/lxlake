@@ -714,6 +714,7 @@ fn push_panel_quads(
 #[lxlake::entry]
 fn app() -> lxlake::Builder {
   lxlake::Builder::new()
+    .app_id("com.lxlake.demo")
     .main_window(WindowDesc {
       title: "lxlake demo".to_owned(),
       size: LogicalSize::new(1280.0, 720.0),

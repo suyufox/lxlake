@@ -32,6 +32,9 @@ type ShutdownHook = Box<dyn FnOnce(&mut App)>;
 #[cfg(feature = "render")]
 type RendererFactory = Box<dyn Fn(Arc<dyn WindowHandle>) -> Result<Renderer, RenderError>>;
 
+/// 没配 `app_id` 时的应用标识。
+const DEFAULT_APP_ID: &str = "lxlake";
+
 /// 装配期插件：拿到当前 [`Builder`]，返回改写后的那个。
 ///
 /// 这里**只留接位**——真正的插件宿主（C ABI / wasmtime）落在 `plugin` 模块，留到后面那一步。
@@ -49,6 +52,8 @@ enum FontSource {
 pub struct Builder {
   /// 应用本体：托管状态与上下文在装配期就已经是运行期那一份。
   app: App,
+  /// 应用标识。应用目录与日志默认落点由它定（见 `crate::path`）。
+  app_id: String,
   /// 待建窗口。标签为主窗口的那个排在最前（`main_window` 换的就是它）。
   windows: Vec<WindowSpec>,
   /// 目标帧间隔；`None` = 不限速。
@@ -84,6 +89,7 @@ impl Builder {
   pub fn new() -> Self {
     Self {
       app: App::new(),
+      app_id: DEFAULT_APP_ID.to_owned(),
       windows: Vec::new(),
       frame_interval: Some(Duration::from_nanos(1_000_000_000 / u64::from(DEFAULT_FPS))),
       workers: None,
@@ -96,6 +102,14 @@ impl Builder {
       on_frame: None,
       on_shutdown: None,
     }
+  }
+
+  /// 应用标识：应用目录与日志默认落点由它定（见 `crate::path::Paths::for_app`）。
+  ///
+  /// 不配就是 `lxlake`；应用该给一个自己专属的（如 `com.lxlake.demo`）。
+  pub fn app_id(mut self, id: impl Into<String>) -> Self {
+    self.app_id = id.into();
+    self
   }
 
   /// 注入**主窗口**（标签固定为 `main`）。重复调用则后一次覆盖前一次。
@@ -295,6 +309,10 @@ impl Application for Builder {
     self.app.context_mut()
   }
 
+  fn app_id(&self) -> &str {
+    &self.app_id
+  }
+
   fn windows(&self) -> Vec<WindowSpec> {
     self.windows.clone()
   }
@@ -453,6 +471,18 @@ mod tests {
 
     let (_, text) = capabilities_of(&mut builder);
     assert!(text, "字体读得进来就该有排版器");
+  }
+
+  /// 应用标识是平台入口算应用目录（与日志默认落点）的依据：不配有一份默认值，配了要生效。
+  ///
+  /// 取值走 [`Application::app_id`] 而不是 `.app_id()`——同名，但那个是**消费式设置器**，
+  /// 链式装配要的是它的名字。
+  #[test]
+  fn the_app_id_is_what_the_assembly_says() {
+    assert_eq!(Application::app_id(&Builder::new()), DEFAULT_APP_ID);
+
+    let builder = Builder::new().app_id("com.lxlake.demo");
+    assert_eq!(Application::app_id(&builder), "com.lxlake.demo");
   }
 
   /// `Builder` 实现 `Application` 是装配期与运行期同一份数据的凭据。

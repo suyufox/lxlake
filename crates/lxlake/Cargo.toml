@@ -36,6 +36,10 @@ crossbeam-deque = "0.8.8"
 # ——不加 feature 门，因为框架主线（不开 render）同样要自绘 UI 文本，而它不碰任何 GPU 类型。
 ab_glyph = "0.2"
 
+# 日志门面（path 层起用，S6 起接订阅器）：tracing 的宏不是平台类型，可以出现在 core / path。
+# 订阅器（tracing-subscriber / tracing-appender）与异步一起在 S6 进，本步只要这一条。
+tracing = "0.1"
+
 [features]
 default = []
 render = ["dep:wgpu", "dep:naga", "dep:bytemuck"]
