@@ -32,5 +32,11 @@ pub mod render;
 /// 应用装配器：`Builder::new().window(..).manage(..).on_frame(..)`。
 pub use runtime::Builder;
 
-/// 应用入口宏：`#[lxlake::entry]`。把它标在装配函数上，函数块的值就是应用实例。
-pub use lxlake_macros::entry;
+/// 应用入口宏族。
+///
+/// - [`entry`](macro@entry)：标在**工厂函数**上，同时产出桌面 `run()` 与 Android `android_main`；
+/// - [`entry_desktop`](macro@entry_desktop) / [`entry_mobile`](macro@entry_mobile)：只要其中一端；
+/// - [`desktop`](macro@desktop) / [`mobile`](macro@mobile)：平台 `cfg` 简写，作用在任意条目上。
+///
+/// 工厂函数无参数、非 `async`，函数块的值就是装配好的 [`Builder`]。
+pub use lxlake_macros::{desktop, entry, entry_desktop, entry_mobile, mobile};
