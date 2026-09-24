@@ -150,3 +150,157 @@ impl AppContext {
     std::mem::take(&mut self.exit_requested)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  /// 只记唤醒次数。
+  #[derive(Default)]
+  struct CountingWakeup(AtomicUsize);
+
+  impl Wakeup for CountingWakeup {
+    fn wake(&self) {
+      self.0.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  /// 假源的记账。
+  ///
+  /// 源被 `Box<dyn EventSource>` 吞进去之后从外面读不到了，所以账目放在 `Arc` 上。
+  #[derive(Default)]
+  struct Log {
+    pumps: AtomicUsize,
+    wakes: AtomicUsize,
+  }
+
+  struct FakeSource {
+    deadline: Option<Instant>,
+    produces: bool,
+    log: Arc<Log>,
+  }
+
+  impl EventSource for FakeSource {
+    fn next_deadline(&self) -> Option<Instant> {
+      self.deadline
+    }
+
+    fn pump(&mut self, cx: &mut PumpContext<'_>) -> bool {
+      self.log.pumps.fetch_add(1, Ordering::SeqCst);
+      if self.produces {
+        self.log.wakes.fetch_add(1, Ordering::SeqCst);
+        cx.wake();
+      }
+      self.produces
+    }
+  }
+
+  fn source_at(deadline: Option<Instant>, produces: bool) -> (FakeSource, Arc<Log>) {
+    let log = Arc::new(Log::default());
+    (
+      FakeSource {
+        deadline,
+        produces,
+        log: Arc::clone(&log),
+      },
+      log,
+    )
+  }
+
+  fn context() -> (AppContext, Arc<CountingWakeup>) {
+    let wakeup = Arc::new(CountingWakeup::default());
+    let cx = AppContext::new(Arc::clone(&wakeup) as Arc<dyn Wakeup>);
+    (cx, wakeup)
+  }
+
+  #[test]
+  fn without_sources_there_is_no_deadline() {
+    let (cx, _) = context();
+    assert_eq!(cx.next_source_deadline(), None);
+    assert!(!cx.source_due(Instant::now()));
+  }
+
+  /// 运行时取最早的截止时间：这就是 `ControlFlow::WaitUntil` 有机会按 ~10ms 醒的前提
+  /// （wry / CEF 的泵频率要求落在这条上）。只依赖帧边界的源不参与。
+  #[test]
+  fn only_the_earliest_deadline_matters() {
+    let (mut cx, _) = context();
+    let now = Instant::now();
+    let (fast, _) = source_at(Some(now + Duration::from_millis(10)), false);
+    let (slow, _) = source_at(Some(now + Duration::from_millis(30)), false);
+    let (passive, _) = source_at(None, false);
+    cx.register_event_source(fast);
+    cx.register_event_source(slow);
+    cx.register_event_source(passive);
+
+    assert_eq!(
+      cx.next_source_deadline(),
+      Some(now + Duration::from_millis(10))
+    );
+  }
+
+  #[test]
+  fn a_source_is_due_at_or_after_its_deadline() {
+    let now = Instant::now();
+    let due = now + Duration::from_millis(10);
+    let (source, _) = source_at(Some(due), false);
+    let (mut cx, _) = context();
+    cx.register_event_source(source);
+
+    assert!(!cx.source_due(now));
+    assert!(!cx.source_due(due - Duration::from_millis(1)));
+    assert!(cx.source_due(due));
+    assert!(cx.source_due(due + Duration::from_millis(5)));
+  }
+
+  /// 泵是「**至少**这么勤」：任何一个源到期，运行时会泵掉**全部**源。
+  ///
+  /// 这条是接口契约的一部分，实现 `EventSource` 的人要靠它：`pump` 必须廉价、且能被超频
+  /// 调用（同一帧里被多泵几次也不能出错）。
+  #[test]
+  fn one_due_source_pumps_every_source() {
+    let now = Instant::now();
+    let (fast, fast_log) = source_at(Some(now), false);
+    let (slow, slow_log) = source_at(Some(now + Duration::from_millis(20)), false);
+    let (mut cx, _) = context();
+    cx.register_event_source(fast);
+    cx.register_event_source(slow);
+
+    cx.pump_sources(now);
+
+    assert_eq!(fast_log.pumps.load(Ordering::SeqCst), 1);
+    assert_eq!(
+      slow_log.pumps.load(Ordering::SeqCst),
+      1,
+      "没到期也被泵了一次"
+    );
+  }
+
+  #[test]
+  fn pump_reports_whether_anything_was_produced() {
+    let now = Instant::now();
+    let (quiet, quiet_log) = source_at(Some(now), false);
+    let (loud, loud_log) = source_at(Some(now), true);
+    let (mut cx, wakeup) = context();
+    cx.register_event_source(quiet);
+    cx.register_event_source(loud);
+
+    // 只要有源产生了东西，运行时就会补一帧。
+    assert!(cx.pump_sources(now));
+    assert_eq!(quiet_log.wakes.load(Ordering::SeqCst), 0);
+    assert_eq!(loud_log.wakes.load(Ordering::SeqCst), 1);
+    // 源在 pump 里调的 `cx.wake()` 转发到注册时给的那个唤醒句柄。
+    assert_eq!(wakeup.0.load(Ordering::SeqCst), 1);
+  }
+
+  #[test]
+  fn a_quiet_batch_does_not_ask_for_a_frame() {
+    let now = Instant::now();
+    let (quiet, _) = source_at(Some(now), false);
+    let (mut cx, _) = context();
+    cx.register_event_source(quiet);
+
+    assert!(!cx.pump_sources(now));
+  }
+}

@@ -18,8 +18,20 @@ pub trait Wakeup: Send + Sync + 'static {
 ///
 /// 运行时在帧边界、以及源自己声明的截止时间上调用 [`EventSource::pump`]。实现必须跑在
 /// **主线程**上且**不得阻塞**——它花的正是帧边界的时间。
+///
+/// 两条契约，实现前先看清楚：
+///
+/// - **泵是「至少」这么勤**：任何一个源到期，运行时会泵掉**全部**源（见
+///   `AppContext::pump_sources`）。于是 `pump` 必须廉价、且能被超频调用——同一帧里被多泵几次
+///   也不能出错。
+/// - **原生窗口不在 [`PumpContext`] 里**：wry / CEF 要的父窗口句柄由源在**构造时**自己拿着
+///   （`AppContext::main_window` 给的是 `Arc<dyn WindowHandle>`），而不是由运行时每泵一次塞进来。
+///   于是这个接口始终不认识窗口，也就不必为它加窗口类型的门。
 pub trait EventSource: 'static {
   /// 下次必须被泵的时间点；`None` 表示只依赖帧边界被动泵。
+  ///
+  /// 返回的是**绝对**时间点。运行时取所有源的**最早**者与下一帧时间取小，据此设
+  /// `ControlFlow::WaitUntil`——wry 与 CEF 约 ~10ms 的泵频率就落在这一条上。
   fn next_deadline(&self) -> Option<Instant> {
     None
   }
