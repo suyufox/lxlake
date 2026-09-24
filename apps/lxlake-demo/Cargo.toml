@@ -1,0 +1,12 @@
+[package]
+name = "lxlake-demo"
+description = "引擎侧应用：启用 render，M1 起承载空岛"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+lxlake = { workspace = true, features = ["render"] }

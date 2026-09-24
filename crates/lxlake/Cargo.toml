@@ -1,0 +1,27 @@
+[package]
+name = "lxlake"
+description = "跨平台应用框架 + 游戏引擎能力（唯一实体库）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 唯一立刻成立的独立 crate：proc-macro 只能是独立 crate（Cargo 硬约束）。
+lxlake-macros = { workspace = true }
+
+# 基础依赖：开窗是框架主线（runtime + platform）的能力，不属于 render。
+# 不开 render 的空窗口也必须能跑，故 winit 不是 optional。
+winit = "0.30.13"
+
+# 渲染（M1 起实装）：全部落在 render 特性之后。
+# naga 的主版本必须跟 wgpu 内部用的那套对齐（wgpu 30 → naga 30），否则包里会出现
+# 两个 naga，类型互不兼容。
+wgpu = { version = "30", optional = true }
+naga = { version = "30", optional = true }
+
+[features]
+default = []
+render = ["dep:wgpu", "dep:naga"]

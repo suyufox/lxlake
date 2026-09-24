@@ -84,7 +84,7 @@ lxlake/
 **同 target 上的可选能力用 feature**：
 
 ```
-render      = ["dep:wgpu", "dep:winit", "dep:naga"]
+render      = ["dep:wgpu", "dep:naga"]
 webview-wry = ["dep:wry"]
 webview-cef = ["dep:cef"]
 cef-ffmpeg  = ["webview-cef", "dep:ffmpeg"]   # GPL 隔离，单独发行物
@@ -94,11 +94,36 @@ plugin      = ["dep:wasmtime", "dep:wit-bindgen"]
 
 `content` 之外的依赖一律 `optional = true`，只经 feature 拉入。
 
+`winit` **不在 `render` 里**——开窗是框架主线（`runtime` + `platform`）的能力，不是渲染的。M0 的空窗口不开 `render` 也必须能跑，所以 `winit` 是基础依赖。
+
 ### feature 统一，以及为什么不靠拆 crate 解决
 
 `cargo build --workspace` 会把 `lxlake-demo` 的 `render` 统一进 `lxlake-editor`（resolver v3 也救不了普通依赖的 feature 统一）。但**按包构建就不会**——`cargo build -p lxlake-editor` 只见 editor 自己的依赖图。
 
 所以约定是：**CI 与本地一律按包构建，不跑 `--workspace`**。这条约定替代了「为了隔离而拆 crate」。
+
+## 任务与异步
+
+**帧循环拥有等待权，异步只是租客。** 事件循环怎么等待由平台决定（winit 的 `ControlFlow::WaitUntil`），任何异步机制都不得在主线程上与它争抢 park。参考项目 `luoxinglake` 的坑与选择也落在这条上：它的 tokio 跑在**独立 worker 线程**，主线程留给窗口系统。
+
+### 任务系统（自建，M1 起）
+
+区块生成与网格化是 CPU 密集、数据并行的作业，且要压在帧预算内——tokio 对此是错的工具（它的阻塞池没有优先级、没有窃取，语义是 I/O 阻塞而非计算）。`runtime` 自建作业系统：
+
+- 工作窃取线程池
+- poll 式任务句柄
+- 主线程只在**帧边界**收结果，工作线程不碰世界状态
+
+不引 rayon 一类现成全局池：作业线程、渲染线程、主线程的核数分配要统一持有，线程数不能交给外部全局池决定。
+
+### 异步运行时（不进基础依赖）
+
+异步运行时**不作为 `lxlake` 的基础依赖**。它解决的是阻塞式 I/O 的并发（网络、进程、文件），属于框架侧横切能力，与引擎主线无关。落地方式：
+
+- 契约层只出**运行时无关**的窄接口：跨线程唤醒句柄 + 帧边界排队。唤醒句柄就是一条 `Arc<dyn Fn() + Send + Sync>` 之类的回调，平台能提供就提供（winit 的 `EventLoopProxy`），提供不了就返回 `None`，控制面降级为帧边界处理
+- 真出现异步消费者时（`update` / `media` 那类），按 `capability` 的可选特性拉入，tokio / smol 只是实现细节；运行时跑在专用 worker 线程，结果经唤醒句柄回主循环
+
+一句话口径：**异步在边缘，帧内保持同步。** M0 不落任何异步代码，只交上面那条缝。
 
 ## webview 双线
 

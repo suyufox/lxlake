@@ -1,0 +1,32 @@
+# lxlake —— workspace 根
+#
+# 实体 crate 只有两个：
+#   lxlake        唯一实体库（core / runtime / platform / render / ui / capability / plugin 是它的模块树）
+#   lxlake-macros proc-macro，Cargo 硬约束（proc-macro crate 只能是独立 crate）
+# 新增 crate 前先核对 docs/architecture.md 的拆包判据，并在提交信息里写明命中哪一条。
+#
+# 构建一律按包进行（cargo build -p lxlake-demo），不跑 --workspace：
+# --workspace 会把 demo 的 render 特性统一进 editor，让架构约束失去验证意义。
+
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# MSRV 对齐本机工具链。别往下调：resolver v3 会据 rust-version 静默把 wgpu 一类依赖
+# 降到旧主版本（设 1.85 时 wgpu 从 30 掉到 26）。
+rust-version = "1.98"
+license = "MIT OR GPL-3.0-only"
+repository = "https://github.com/suyufox/lxlake"
+publish = false
+
+[workspace.dependencies]
+lxlake = { path = "crates/lxlake" }
+lxlake-macros = { path = "crates/lxlake-macros" }
+
+# 引擎内部一律 rlib 静态链接，全量单态化 + 跨 crate LTO（见 docs/roadmap.md 依赖的取舍）。
+[profile.release]
+lto = "fat"
+codegen-units = 1

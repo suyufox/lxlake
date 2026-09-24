@@ -1,0 +1,12 @@
+[package]
+name = "lxlake-editor"
+description = "框架侧应用：不启用 render，验证「框架主线不依赖渲染」"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+lxlake = { workspace = true }

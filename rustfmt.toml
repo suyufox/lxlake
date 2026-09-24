@@ -1,0 +1,5 @@
+# 缩进 2 空格（沿用 d-workspace-luoxinglake 的风格裁定）
+tab_spaces = 2
+# lint-staged 直接调 `rustfmt`（不经 `cargo fmt`），读不到 Cargo.toml 的 edition，
+# 故在此显式声明，避免钩子与 `cargo fmt` 格式化出两套结果。
+edition = "2024"
