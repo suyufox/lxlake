@@ -393,16 +393,8 @@ impl Demo {
   }
 }
 
-impl App for Demo {
-  fn windows(&self) -> Vec<WindowDesc> {
-    vec![WindowDesc {
-      title: "lxlake demo".to_owned(),
-      size: LogicalSize::new(1280.0, 720.0),
-      ..WindowDesc::default()
-    }]
-  }
-
-  fn on_startup(&mut self, cx: &mut AppContext) {
+impl Demo {
+  fn startup(&mut self, cx: &mut AppContext) {
     self.pool = Some(JobPool::with_workers(Self::worker_count(), cx.wakeup()));
 
     // HUD 的字体在这里读：8MB 的 CJK 字库不进二进制，走发行物的 `data/`（见 `HUD_FONT`）。
@@ -429,7 +421,7 @@ impl App for Demo {
     window.set_cursor_visible(false);
   }
 
-  fn on_event(&mut self, cx: &mut AppContext, event: &Event) {
+  fn handle_event(&mut self, cx: &mut AppContext, event: &Event) {
     match event {
       Event::CloseRequested { .. } => cx.exit(),
       // 设备事件到这里就只剩「源 + 按下/抬起」：查表、记状态都在 `IntentState`，应用不再碰按键。
@@ -504,7 +496,7 @@ impl App for Demo {
     }
   }
 
-  fn on_frame(&mut self, cx: &mut AppContext, frame: Frame) {
+  fn frame(&mut self, cx: &mut AppContext, frame: Frame) {
     self.frames += 1;
     // 帧率的平滑值（标题栏那份仍是每秒的窗口平均，见 `report`）。
     let delta = frame.delta.as_secs_f32();
@@ -604,11 +596,31 @@ impl App for Demo {
     self.report(cx, frame);
   }
 
-  fn on_shutdown(&mut self, _cx: &mut AppContext) {
+  fn shutdown(&mut self) {
     // 显式放掉：GPU 资源与池都该在事件循环退出前收干净，别留给进程退出去处理。
     self.renderer = None;
     self.pool = None;
   }
+}
+
+/// 生命周期：装配层（[`Builder`](lxlake::Builder)）把钩子交给下面这几个自由函数，
+/// 每个钩子从托管状态里取出 [`Demo`]，再交给它自己的方法。
+///
+/// 状态与上下文**同时**要用的地方走 [`App::with_state`]（状态临时取出，两个借用互不相干）。
+fn on_startup(app: &mut App) {
+  app.with_state::<Demo, _>(Demo::startup);
+}
+
+fn on_event(app: &mut App, event: &Event) {
+  app.with_state::<Demo, _>(|demo, cx| demo.handle_event(cx, event));
+}
+
+fn on_frame(app: &mut App, frame: Frame) {
+  app.with_state::<Demo, _>(|demo, cx| demo.frame(cx, frame));
+}
+
+fn on_shutdown(app: &mut App) {
+  app.with_state::<Demo, _>(|demo, _| demo.shutdown());
 }
 
 /// 世界坐标 → 区块坐标（焦点）。用欧几里得除法换算，负坐标才不会偏一格。
@@ -712,9 +724,20 @@ fn push_panel_quads(
   }
 }
 
+/// 应用入口：`#[lxlake::entry]` 只标**装配**这一层——函数块的值就是装配好的应用。
 #[lxlake::entry]
-fn main() -> Demo {
-  Demo::new()
+fn main() -> lxlake::Builder {
+  lxlake::Builder::new()
+    .window(WindowDesc {
+      title: "lxlake demo".to_owned(),
+      size: LogicalSize::new(1280.0, 720.0),
+      ..WindowDesc::default()
+    })
+    .manage(Demo::new())
+    .on_startup(on_startup)
+    .on_event(on_event)
+    .on_frame(on_frame)
+    .on_shutdown(on_shutdown)
 }
 
 #[cfg(test)]

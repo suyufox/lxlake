@@ -5,7 +5,7 @@
 //! 分层落在**模块树**上，不落在 crate 边界上：
 //!
 //! - [`core`] —— 契约：事件、几何、窗口、Widget 的数据与 trait。**硬约束：不出现 winit / wgpu 类型**
-//! - [`runtime`] —— 事件循环、[`App`](runtime::App)、帧循环、外部事件源泵、作业池
+//! - [`runtime`] —— 装配（[`Builder`]）、帧循环、[`App`](runtime::App)、外部事件源泵、作业池
 //! - `platform` —— 平台后端，按 `cfg(target_os)` 分档；应用代码不该碰它，用 [`runtime::run`] 即可
 //! - [`world`] —— 体素世界：方块注册表、区块、浮岛生成、区块流式
 //! - [`meshing`] —— 区块 → 网格（纯 CPU，POD 顶点）
@@ -29,5 +29,8 @@ pub mod world;
 #[cfg(feature = "render")]
 pub mod render;
 
-/// 应用入口宏：`#[lxlake::entry]`。把它标在 `main` 上，函数块的值就是应用实例。
+/// 应用装配器：`Builder::new().window(..).manage(..).on_frame(..)`。
+pub use runtime::Builder;
+
+/// 应用入口宏：`#[lxlake::entry]`。把它标在装配函数上，函数块的值就是应用实例。
 pub use lxlake_macros::entry;

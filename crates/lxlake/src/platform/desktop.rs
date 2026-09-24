@@ -1,14 +1,14 @@
 //! winit 驱动的桌面后端（windows / linux / macos）。
 //!
 //! 职责边界：本文件是**唯一**碰 winit 的地方（`core` 与 `runtime` 都不认识 winit）。
-//! 它做三件事——建窗、把原生事件翻译成 [`Event`]、驱动 `App` 的帧钩子。
+//! 它做三件事——建窗、把原生事件翻译成 [`Event`]、驱动 [`Application`] 的帧钩子。
 
 use crate::core::Error;
 use crate::core::event::Event;
 use crate::core::geometry::{PhysicalPosition, PhysicalSize};
 use crate::core::input::{Key, MouseButton};
 use crate::core::window::{WindowHandle, WindowId};
-use crate::runtime::{App, AppContext, FrameClock, Wakeup};
+use crate::runtime::{Application, FrameClock, Wakeup};
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
 use std::time::Instant;
@@ -94,11 +94,10 @@ impl WindowHandle for DesktopWindow {
 }
 
 /// 事件循环驱动器。
-struct Driver<A: App> {
+struct Driver<A: Application> {
   app: A,
-  cx: AppContext,
   clock: FrameClock,
-  /// 窗口翻译表：平台 id → 契约 id。窗口本体由 [`AppContext`] 持有。
+  /// 窗口翻译表：平台 id → 契约 id。窗口本体由 [`AppContext`](crate::runtime::AppContext) 持有。
   window_ids: Vec<(WinitWindowId, WindowId)>,
   next_window_id: u64,
   /// 已进入 `resumed`：桌面端要等第一次 resume 才允许建窗。
@@ -107,13 +106,13 @@ struct Driver<A: App> {
   frame_pending: bool,
 }
 
-impl<A: App> Driver<A> {
-  fn new(app: A, proxy: EventLoopProxy<UserEvent>) -> Self {
+impl<A: Application> Driver<A> {
+  fn new(mut app: A, proxy: EventLoopProxy<UserEvent>) -> Self {
+    // 唤醒句柄要等事件循环建好才有，所以在这里注入（应用对象早于事件循环就已构造）。
+    app.attach_wakeup(Arc::new(ProxyWakeup(proxy)));
     let clock = FrameClock::new(app.frame_interval(), Instant::now());
-    let wakeup: Arc<dyn Wakeup> = Arc::new(ProxyWakeup(proxy));
     Self {
       app,
-      cx: AppContext::new(wakeup),
       clock,
       window_ids: Vec::new(),
       next_window_id: 0,
@@ -141,32 +140,36 @@ impl<A: App> Driver<A> {
       let id = WindowId(self.next_window_id);
       self.next_window_id += 1;
       self.window_ids.push((window.id(), id));
-      self.cx.push_window(Arc::new(DesktopWindow { id, window }));
+      self
+        .app
+        .context_mut()
+        .push_window(Arc::new(DesktopWindow { id, window }));
+      self.app.on_window_ready(id);
     }
   }
 
   /// 出一帧：推进时钟并交给应用。
   fn tick_frame(&mut self, now: Instant) {
     let frame = self.clock.advance(now);
-    self.app.on_frame(&mut self.cx, frame);
+    self.app.on_frame(frame);
   }
 
   fn pump_sources(&mut self, now: Instant) {
-    if self.cx.pump_sources(now) {
+    if self.app.context_mut().pump_sources(now) {
       self.frame_pending = true;
     }
   }
 
   fn emit(&mut self, event: Event) {
-    self.app.on_event(&mut self.cx, &event);
+    self.app.on_event(&event);
   }
 
   /// 决定下一次醒来的时机：谁先到期听谁的。
-  fn schedule(&self, event_loop: &ActiveEventLoop) {
+  fn schedule(&mut self, event_loop: &ActiveEventLoop) {
     let flow = match self.clock.next_due() {
       // 不限速：交给 present mode / 系统节流。
       None => ControlFlow::Poll,
-      Some(frame_due) => match self.cx.next_source_deadline() {
+      Some(frame_due) => match self.app.context_mut().next_source_deadline() {
         Some(source_due) => ControlFlow::WaitUntil(frame_due.min(source_due)),
         None => ControlFlow::WaitUntil(frame_due),
       },
@@ -177,11 +180,11 @@ impl<A: App> Driver<A> {
   /// 释放窗口。必须发生在事件循环销毁之前。
   fn close_windows(&mut self) {
     self.window_ids.clear();
-    self.cx.clear_windows();
+    self.app.context_mut().clear_windows();
   }
 }
 
-impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
+impl<A: Application> ApplicationHandler<UserEvent> for Driver<A> {
   fn resumed(&mut self, event_loop: &ActiveEventLoop) {
     if self.started {
       return;
@@ -190,7 +193,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
     // 原始鼠标位移是设备级事件，得显式声明要。只在窗口有焦点时要——后台不必收。
     event_loop.listen_device_events(DeviceEvents::WhenFocused);
     self.create_windows(event_loop);
-    self.app.on_startup(&mut self.cx);
+    self.app.on_startup();
     self.frame_pending = true;
   }
 
@@ -231,7 +234,8 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
       }
       WinitWindowEvent::ScaleFactorChanged { scale_factor, .. } => {
         let size = self
-          .cx
+          .app
+          .context_mut()
           .window(id)
           .map_or_else(PhysicalSize::default, |w| w.size());
         self.emit(Event::ScaleFactorChanged {
@@ -258,7 +262,8 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
       // 光标位置换算成逻辑坐标再派发：UI 的布局与命中测试全在逻辑像素里，应用不必自己乘 DPI。
       WinitWindowEvent::CursorMoved { position, .. } => {
         let scale_factor = self
-          .cx
+          .app
+          .context_mut()
           .window(id)
           .map_or(1.0, |window| window.scale_factor());
         self.emit(Event::CursorMoved {
@@ -308,7 +313,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
     let now = Instant::now();
 
     // 事件源比帧更细，先按它们的截止时间泵。
-    if self.cx.source_due(now) {
+    if self.app.context_mut().source_due(now) {
       self.pump_sources(now);
     }
 
@@ -317,7 +322,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
       self.tick_frame(now);
     }
 
-    if self.cx.take_exit_requested() {
+    if self.app.context_mut().take_exit_requested() {
       event_loop.exit();
       return;
     }
@@ -326,13 +331,13 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
   }
 
   fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-    self.app.on_shutdown(&mut self.cx);
+    self.app.on_shutdown();
     self.close_windows();
   }
 }
 
 /// 跑事件循环，阻塞至应用退出。
-pub(crate) fn run<A: App>(app: A) -> Result<(), Error> {
+pub(crate) fn run<A: Application>(app: A) -> Result<(), Error> {
   let event_loop = EventLoop::<UserEvent>::with_user_event()
     .build()
     .map_err(|err| Error::Platform(format!("创建事件循环失败：{err}")))?;
