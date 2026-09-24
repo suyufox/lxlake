@@ -6,13 +6,23 @@
 lxlake/
 ├── crates/          # Rust 成员 crate
 ├── packages/        # Node 包（pnpm workspace 成员）
+├── docs/            # 设计与规划文档
 ├── .husky/          # git hooks
 ├── .editorconfig
 ├── .gitattributes
 ├── .gitignore
 ├── .gitmessage
+├── CONTRIBUTING.md
 └── pnpm-workspace.yaml
 ```
+
+## 文档
+
+| 文档                                         | 内容                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| [docs/architecture.md](docs/architecture.md) | 定位、平台范围、分层、分包与拆包判据、feature 分档、webview 双线 |
+| [docs/roadmap.md](docs/roadmap.md)           | 里程碑、当前目标与验收、之后要做的                               |
+| [docs/environment.md](docs/environment.md)   | 工具链基线、环境变量、rustup targets、构建约定                   |
 
 ## 环境要求
 
@@ -23,6 +33,17 @@ lxlake/
 | Rust    | stable，含 `rustfmt`            |
 
 首次克隆后执行一次 `pnpm install`，会自动注册 git hooks。
+
+## 构建
+
+**按包构建，不跑 `--workspace`**：
+
+```
+cargo build -p lxlake-editor
+cargo build -p lxlake-demo
+```
+
+`cargo build --workspace` 会把 demo 的 `render` 特性统一进 editor，让「框架主线不依赖渲染」这条架构约束失去验证意义。原因详见 [docs/architecture.md](docs/architecture.md)。
 
 ## 分支策略
 
@@ -60,6 +81,7 @@ lxlake/
 - `subject` 使用祈使句，不加结尾句号，中文英文均可，建议 50 字符内
 - 完整标题不超过 100 字符
 - 破坏性变更在页脚写 `BREAKING CHANGE: <说明与迁移方式>`
+- 新增实体 crate 时，提交信息正文写明命中[拆包判据](docs/architecture.md)中的哪一条
 
 ### 示例
 
