@@ -64,15 +64,72 @@ impl Intent {
   }
 }
 
+/// 实体标识。**由产生方发号**（将来的世界存储只做去重与生命周期），因此它必须是可序列化的数据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntityId(pub u64);
+
+/// 实体命令：把「实体该长什么样、在哪」表达成数据。
+///
+/// 落地在**实体存储**（尚未实装，故执行器只留注册位）：本层只定形状，不碰存储。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EntityCommand {
+  /// 造一个实体：`kind` 是实体种类号（将来的注册表查它）。
+  Spawn {
+    id: EntityId,
+    kind: u16,
+    pos: [f32; 3],
+  },
+  /// 销毁一个实体。
+  Despawn { id: EntityId },
+  /// 摆位：位置 + 朝向（偏航 / 俯仰，弧度）。
+  SetTransform {
+    id: EntityId,
+    pos: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+  },
+}
+
+impl fmt::Display for EntityId {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "#{}", self.0)
+  }
+}
+
+impl fmt::Display for EntityCommand {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Spawn { id, kind, pos } => write!(
+        f,
+        "spawn {id} kind={kind} at ({}, {}, {})",
+        pos[0], pos[1], pos[2]
+      ),
+      Self::Despawn { id } => write!(f, "despawn {id}"),
+      Self::SetTransform {
+        id,
+        pos,
+        yaw,
+        pitch,
+      } => write!(
+        f,
+        "move {id} to ({}, {}, {}) yaw={yaw} pitch={pitch}",
+        pos[0], pos[1], pos[2]
+      ),
+    }
+  }
+}
+
 /// 命令：已经解析出目标坐标的、**可序列化的数据**。
 ///
-/// 执行器在世界侧（[`crate::world::World::apply`]）：契约层只管形状，不碰世界状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 执行器在世界侧（[`crate::world::WorldExecutor`]）：契约层只管形状，不碰世界状态。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Command {
   /// 破坏：把 `pos` 上的方块挖成空气。
   Break { pos: [i32; 3] },
   /// 放置：在 `pos` 上放一块 `block`。
   Place { pos: [i32; 3], block: BlockId },
+  /// 实体：造 / 销毁 / 摆位（见 [`EntityCommand`]）。
+  Entity(EntityCommand),
 }
 
 impl fmt::Display for Command {
@@ -83,6 +140,7 @@ impl fmt::Display for Command {
       Self::Place { pos, block } => {
         write!(f, "place ({}, {}, {}) {block}", pos[0], pos[1], pos[2])
       }
+      Self::Entity(entity) => write!(f, "{entity}"),
     }
   }
 }
@@ -113,6 +171,35 @@ mod tests {
       }
       .to_string(),
       "place (1, -2, 3) block#0"
+    );
+  }
+
+  /// 实体命令也要进同一条命令流（`Display` 一行一条是 M2 验收第 4 条）。
+  #[test]
+  fn entity_commands_print_as_one_line_each() {
+    let id = EntityId(7);
+    assert_eq!(
+      Command::Entity(EntityCommand::Spawn {
+        id,
+        kind: 3,
+        pos: [1.0, 2.0, 3.0],
+      })
+      .to_string(),
+      "spawn #7 kind=3 at (1, 2, 3)"
+    );
+    assert_eq!(
+      Command::Entity(EntityCommand::Despawn { id }).to_string(),
+      "despawn #7"
+    );
+    assert_eq!(
+      Command::Entity(EntityCommand::SetTransform {
+        id,
+        pos: [0.5, -1.0, 2.0],
+        yaw: 1.0,
+        pitch: -0.5,
+      })
+      .to_string(),
+      "move #7 to (0.5, -1, 2) yaw=1 pitch=-0.5"
     );
   }
 }

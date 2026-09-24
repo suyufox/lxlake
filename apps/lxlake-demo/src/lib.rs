@@ -26,14 +26,14 @@ use lxlake::core::input::{InputSource, IntentState, Key, Keymap, MouseButton};
 use lxlake::core::widget::{Anchor, UiId, Widget};
 use lxlake::core::window::WindowDesc;
 use lxlake::render::Renderer;
-use lxlake::runtime::{App, AppContext, Capabilities, Frame};
+use lxlake::runtime::{App, AppContext, Capabilities, CommandBus, Frame};
 use lxlake::ui::{Quad, TextShaper, TextStyle, UiTree};
 use lxlake::world::block::{BlockDef, BlockId, BlockPalette, BlockRegistry, FaceTiles};
 use lxlake::world::chunk::ChunkPos;
 use lxlake::world::collision::sweep;
 use lxlake::world::raycast::raycast;
 use lxlake::world::terrain::{ISLAND_MAX_CHUNK_Y, ISLAND_MIN_CHUNK_Y, IslandGenerator};
-use lxlake::world::{Aabb, ChunkStreamer, StreamBounds, StreamOutput, World};
+use lxlake::world::{Aabb, ChunkStreamer, StreamBounds, StreamOutput, World, WorldExecutor};
 use std::time::Duration;
 
 /// 帧率汇总周期。
@@ -142,8 +142,10 @@ struct Demo {
   keymap: Keymap,
   /// 键位表的落点：轴意图按住 / 动作意图排队。
   intents: IntentState,
-  /// 本帧攒下的命令：帧边界按序应用（M2 验收第 4 条要能打印出这条序列）。
-  commands: Vec<Command>,
+  /// 本帧攒下的命令。帧边界按序派发（M2 验收第 4 条要能打印出这条序列）。
+  ///
+  /// 总线只管**顺序**；落地在世界侧的执行器手里（见 [`CommandBus::flush`]）。
+  bus: CommandBus,
   /// 放置用的方块。
   place_block: BlockId,
   /// 本帧累计的鼠标位移，`on_frame` 里消费掉。
@@ -203,7 +205,7 @@ impl Demo {
       output: StreamOutput::default(),
       keymap: default_keymap(),
       intents: IntentState::new(),
-      commands: Vec::new(),
+      bus: CommandBus::new(),
       place_block: palette.grass,
       look: [0.0, 0.0],
       tree: UiTree::new(),
@@ -521,28 +523,20 @@ impl Demo {
         Intent::Quit => cx.exit(),
         Intent::Break | Intent::Place => {
           if let Some(command) = self.command_for(intent) {
-            self.commands.push(command);
+            self.bus.enqueue(command);
           }
         }
         _ => {}
       }
     }
 
-    // 命令在帧边界、模拟之前按序应用：本帧改的方块本帧就进重算队列，画面下一帧更新。
+    // 命令在帧边界、模拟之前按序派发：本帧改的方块本帧就进重算队列，画面下一帧更新。
     // 这条序列就是 M2 验收第 4 条要的「命令流」——M4 存档与将来联机从这里接。
-    if !self.commands.is_empty() {
-      let line = self
-        .commands
-        .iter()
-        .map(Command::to_string)
-        .collect::<Vec<_>>()
-        .join(" | ");
-      println!("本帧命令：{line}");
+    if !self.bus.is_empty() {
+      println!("本帧命令：{}", self.bus.describe());
 
-      let mut dirty = Vec::new();
-      for command in self.commands.drain(..) {
-        dirty.extend(self.world.apply(&command));
-      }
+      let mut world = WorldExecutor::new(&mut self.world);
+      let dirty = self.bus.flush(&mut [&mut world]);
       self.streamer.mark_dirty(&dirty);
     }
 

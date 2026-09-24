@@ -12,6 +12,7 @@
 mod app;
 mod builder;
 mod clock;
+mod command;
 mod exec;
 mod jobs;
 mod log;
@@ -21,6 +22,7 @@ mod window;
 pub use app::{App, AppContext, Capabilities};
 pub use builder::{Builder, Plugin};
 pub use clock::{Frame, FrameClock};
+pub use command::{CommandBus, CommandExecutor};
 pub use exec::{AsyncConfig, AsyncRuntime, Mailbox, MailboxSender};
 pub use jobs::{JobContext, JobHandle, JobPool};
 pub use log::{FileSink, LogConfig, LogError, Rotation};

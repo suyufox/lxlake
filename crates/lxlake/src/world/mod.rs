@@ -27,6 +27,7 @@
 pub mod block;
 pub mod chunk;
 pub mod collision;
+pub mod command;
 pub mod raycast;
 pub mod stream;
 pub mod terrain;
@@ -34,6 +35,7 @@ pub mod terrain;
 pub use block::{BlockDef, BlockId, BlockPalette, BlockRegistry, Face, FaceTiles};
 pub use chunk::{CHUNK_SIZE, CHUNK_VOLUME, Chunk, ChunkNeighborhood, ChunkPos};
 pub use collision::Aabb;
+pub use command::WorldExecutor;
 pub use raycast::RayHit;
 pub use stream::{ChunkStreamer, StreamBounds, StreamOutput};
 pub use terrain::IslandGenerator;
@@ -174,6 +176,8 @@ impl World {
           Vec::new()
         }
       }
+      // 实体命令不是方块编辑：世界不认识它，返回空（让执行器链上的下一个接手）。
+      Command::Entity(_) => Vec::new(),
     }
   }
 
