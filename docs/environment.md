@@ -36,7 +36,8 @@ VCPKG_ROOT    = C:\Users\suyufox\.lxlake\path\vcpkg\latest
 
 ## rustup targets
 
-当前已装的**只有** `x86_64-pc-windows-msvc`。按平台补齐：
+当前已装 `x86_64-pc-windows-msvc`（宿主）与 `aarch64-linux-android`（android 类型检查用）。
+按平台补齐：
 
 ```
 # windows
@@ -57,6 +58,16 @@ android 四 ABI 与 vcpkg 三元组的映射：
 | `armv7-linux-androideabi` | `armeabi-v7a` | `arm-neon-android` |
 | `i686-linux-android`      | `x86`         | `x86-android`      |
 | `x86_64-linux-android`    | `x86_64`      | `x64-android`      |
+
+android 的类型检查**走 cargo-ndk，不裸跑 `cargo check --target`**——后者会让 `cc` 的构建脚本去找
+`aarch64-linux-android-clang++`（本机没有），报「找不到链接器」；cargo-ndk 会按 NDK 注入 `CC` / `CXX`。
+本机实测可过：
+
+```
+$env:ANDROID_NDK_HOME = "d:\Path\AndroidSdk\ndk\30.0.16248370"
+cargo ndk -t arm64-v8a check -p lxlake
+cargo ndk -t arm64-v8a check -p lxlake-demo --lib   # android 无 bin，打包只取 lib，故加 --lib
+```
 
 apple 平台的 target 需要时再加；C 依赖清单不含 apple（见[架构](architecture.md)）。
 

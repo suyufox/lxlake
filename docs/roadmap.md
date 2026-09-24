@@ -202,10 +202,15 @@ Widget 树）、`ui::text`（ab_glyph + `data/fonts` 下的 OFL CJK 字体：按
 追加在 main pass 之后）、`lxlake-demo` 的接线（左上角信息面板、屏幕中央准星、Tab 调试面板与输入
 闸口）。
 
-按包验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 92 项、`--features render` 107 项、
+按包验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 146 项、`--features render` 161 项、
 `cargo test -p lxlake-demo` 4 项全绿；`clippy --all-targets -D warnings` 与 `cargo fmt --all --check`
 无告警；`cargo build -p lxlake-editor` 的依赖图里 wgpu / naga / bytemuck 仍是 **0 次**（排版只用
 普通依赖 `ab_glyph`，不受 `render` 门控）。剩下的是**实机看一眼** HUD，以及切 4 的 wry 覆盖层。
+
+同一轮还顺手做了**框架主线的重构**：`Builder` 装配面、窗口身份（标签取窗与多窗口）、统一路径层、
+日志与异步运行时、命令总线，并为 android 铺好入口（接入已落地、类型检查已过，打包与真机在后）。
+它不被里程碑的交付项绑定，但把堆在 demo `main.rs` 里的接线收进了运行时——形状见[架构](architecture.md)
+的「应用装配」。M3 因此只剩切 4。
 
 ### 做
 
