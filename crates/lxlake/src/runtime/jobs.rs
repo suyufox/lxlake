@@ -99,7 +99,9 @@ impl Shared {
 
   /// 报一个作业完成。**合并唤醒**：`pending` 归零（这一批全部收工）才去打断主循环。
   fn complete(&self) {
-    if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
+    let previous = self.pending.fetch_sub(1, Ordering::AcqRel);
+    tracing::trace!(pending = previous - 1, "作业完成");
+    if previous == 1 {
       self.wakeup.wake();
     }
   }
@@ -188,6 +190,7 @@ impl JobPool {
       shared.injector.push(task);
     }
     shared.idle_cv.notify_one();
+    tracing::trace!(workers = self.inner.workers, "提交作业");
 
     JobHandle { cancelled, result }
   }

@@ -6,6 +6,7 @@
 //!
 //! 平台侧不认识 [`App`]，它只认 [`Application`](super::Application)。
 
+use super::exec::{AsyncRuntime, Mailbox};
 use super::jobs::JobPool;
 use super::pump::{EventSource, PumpContext, Wakeup};
 use super::window::{Window, WindowRegistry};
@@ -150,6 +151,7 @@ impl AppContext {
     for source in &mut self.sources {
       woke |= source.pump(&mut PumpContext::new(now, wakeup));
     }
+    tracing::trace!(sources = self.sources.len(), woke, "泵事件源");
     woke
   }
 
@@ -185,6 +187,8 @@ pub struct App {
   jobs: Option<JobPool>,
   /// 文本排版器：装配期按字体配置建，运行期可变借出（排版会往字形缓存里塞东西）。
   text: Option<TextShaper>,
+  /// 异步运行时：装配期按 `Builder::async_runtime` 起，运行期只读借出。
+  exec: Option<AsyncRuntime>,
   /// 渲染器：**按窗一份**，窗口建好时惰建（见 `Builder::renderer`）。
   #[cfg(feature = "render")]
   gpu: BTreeMap<WindowId, Renderer>,
@@ -197,6 +201,7 @@ impl App {
       managed: BTreeMap::new(),
       jobs: None,
       text: None,
+      exec: None,
       #[cfg(feature = "render")]
       gpu: BTreeMap::new(),
     }
@@ -278,6 +283,31 @@ impl App {
       .expect("托管状态的键与值类型一致")
   }
 
+  /// 异步运行时：`Builder::async_runtime` 配过才有。
+  ///
+  /// 提交任务的场合多得很（帧里也能提），所以它是独立取值而不是能力视图的一项；`None` 时
+  /// 应用自己降级（同步做掉，或干脆不做）。
+  pub fn exec(&self) -> Option<&AsyncRuntime> {
+    self.exec.as_ref()
+  }
+
+  /// 帧边界邮箱：按类型**懒建**并托管（见 [`Mailbox`]）。
+  ///
+  /// 帧里的典型用法是先排空、再带着结果去改世界状态：
+  ///
+  /// ```ignore
+  /// let drained: Vec<Msg> = app.mailbox::<Msg>().drain().collect();
+  /// app.with_state::<World, _>(|world, _| world.apply(drained));
+  /// ```
+  pub fn mailbox<T: Send + 'static>(&mut self) -> &mut Mailbox<T> {
+    self
+      .managed
+      .entry(TypeId::of::<Mailbox<T>>())
+      .or_insert_with(|| Box::new(Mailbox::<T>::new()))
+      .downcast_mut::<Mailbox<T>>()
+      .expect("托管状态的键与值类型一致")
+  }
+
   /// **同时**取托管状态与上下文。
   ///
   /// 状态与上下文都在 `App` 里，直接给两份可变借用是给不出来的；所以这里把状态**临时取出来**：
@@ -347,6 +377,16 @@ impl App {
   /// 装排版器（装配期调一次）。
   pub(crate) fn set_text(&mut self, shaper: TextShaper) {
     self.text = Some(shaper);
+  }
+
+  /// 装异步运行时（装配期调一次）。
+  pub(crate) fn set_exec(&mut self, runtime: AsyncRuntime) {
+    self.exec = Some(runtime);
+  }
+
+  /// 收异步运行时：`Drop` 会关停宿主线程并 join（见 [`AsyncRuntime`]）。
+  pub(crate) fn clear_exec(&mut self) {
+    self.exec = None;
   }
 
   /// 某个窗口的渲染器建好了。同一窗口再建即覆盖（旧的先释放，表面不会挂着两个）。

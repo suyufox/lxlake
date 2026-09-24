@@ -9,6 +9,8 @@
 //! [`runtime::run`](super::run) 直接吃它，不必再造一个中间类型。
 
 use super::app::{App, AppContext};
+use super::exec::{AsyncConfig, AsyncRuntime};
+use super::log::LogConfig;
 use super::{Application, DEFAULT_FPS, Frame, JobPool, Wakeup};
 use crate::core::Error;
 use crate::core::event::Event;
@@ -62,6 +64,10 @@ pub struct Builder {
   workers: Option<usize>,
   /// 字体来源；`None` = 不建排版器。
   font: Option<FontSource>,
+  /// 日志配置；`None` = 不装全局订阅器。
+  log: Option<LogConfig>,
+  /// 异步运行时配置；`None` = 不起宿主线程（`App::exec()` 为 `None`）。
+  async_config: Option<AsyncConfig>,
   /// 待应用的插件：`run` 起点按加入顺序依次改写装配。
   plugins: Vec<Box<dyn Plugin>>,
   /// 渲染器工厂：窗口建好时按它的句柄建一份。`None` = 不建渲染器。
@@ -94,6 +100,8 @@ impl Builder {
       frame_interval: Some(Duration::from_nanos(1_000_000_000 / u64::from(DEFAULT_FPS))),
       workers: None,
       font: None,
+      log: None,
+      async_config: None,
       plugins: Vec::new(),
       #[cfg(feature = "render")]
       renderer: None,
@@ -149,9 +157,27 @@ impl Builder {
     self
   }
 
-  /// UI 字体直接用字节（已经由应用读进内存的那份）。
+  /// 字体直接用字节（已经由应用读进内存的那份）。
   pub fn font_bytes(mut self, bytes: Vec<u8>) -> Self {
     self.font = Some(FontSource::Bytes(bytes));
+    self
+  }
+
+  /// 日志配置：平台入口在装完路径之后安装（见 [`LogConfig`]）。不配就不装订阅器。
+  pub fn log(mut self, config: LogConfig) -> Self {
+    self.log = Some(config);
+    self
+  }
+
+  /// 日志配置由闭包给——配置本身要读应用自己的东西（配置文件、命令行）时走它。
+  pub fn log_with(mut self, configure: impl FnOnce() -> LogConfig) -> Self {
+    self.log = Some(configure());
+    self
+  }
+
+  /// 异步运行时。不配就不起宿主线程，`App::exec()` 为 `None`。
+  pub fn async_runtime(mut self, config: AsyncConfig) -> Self {
+    self.async_config = Some(config);
     self
   }
 
@@ -219,7 +245,8 @@ impl Builder {
     self
   }
 
-  /// 装配期把能力建起来。作业池要唤醒句柄（此刻已由平台注入），字体在这里读一次。
+  /// 装配期把能力建起来。作业池要唤醒句柄（此刻已由平台注入），字体在这里读一次；
+  /// 异步运行时也在这里起（同样要等唤醒句柄就位，且起不来不该挡住启动）。
   fn install_capabilities(&mut self) {
     if let Some(workers) = self.workers {
       self
@@ -232,13 +259,20 @@ impl Builder {
         Err(reason) => eprintln!("lxlake: {reason}"),
       }
     }
+    if let Some(config) = self.async_config.take() {
+      match AsyncRuntime::new(config) {
+        Ok(runtime) => self.app.set_exec(runtime),
+        Err(error) => eprintln!("lxlake: {error}"),
+      }
+    }
   }
 
   /// 收干净能力：渲染器要在**窗口之前**放——表面挂着窗口句柄，等窗口没了再放就要处理
-  /// 「表面活过了窗口」。
+  /// 「表面活过了窗口」。异步运行时也在这里收：宿主线程关停并 join，别让它活到进程退出之后。
   fn release_capabilities(&mut self) {
     #[cfg(feature = "render")]
     self.app.clear_gpu();
+    self.app.clear_exec();
   }
 
   /// 引擎内建的窗口事件转发：resize / DPI 变化先落到**该窗**的渲染器上，再进应用闭包。
@@ -311,6 +345,10 @@ impl Application for Builder {
 
   fn app_id(&self) -> &str {
     &self.app_id
+  }
+
+  fn log_config(&self) -> Option<&LogConfig> {
+    self.log.as_ref()
   }
 
   fn windows(&self) -> Vec<WindowSpec> {

@@ -36,9 +36,16 @@ crossbeam-deque = "0.8.8"
 # ——不加 feature 门，因为框架主线（不开 render）同样要自绘 UI 文本，而它不碰任何 GPU 类型。
 ab_glyph = "0.2"
 
-# 日志门面（path 层起用，S6 起接订阅器）：tracing 的宏不是平台类型，可以出现在 core / path。
-# 订阅器（tracing-subscriber / tracing-appender）与异步一起在 S6 进，本步只要这一条。
+# 日志门面：tracing 的宏不是平台类型，可以出现在 core / path。
 tracing = "0.1"
+# 订阅器与轮转 appender：**安装**发生在平台入口（见 runtime/log.rs 的数据与安装分离），
+# 与 core / winit 都无关，故不是 optional。
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "tracing-log"] }
+tracing-appender = "0.2"
+
+# 异步：只开 rt 类特性（rt / rt-multi-thread / time / sync），**不碰 net / io 驱动**——
+# 网络与文件 I/O 由将来具体的 capability 按需自己加特性，框架主线不无谓地拉进 mio。
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync"] }
 
 [features]
 default = []

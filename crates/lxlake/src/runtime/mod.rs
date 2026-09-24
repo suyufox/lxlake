@@ -12,14 +12,18 @@
 mod app;
 mod builder;
 mod clock;
+mod exec;
 mod jobs;
+mod log;
 mod pump;
 mod window;
 
 pub use app::{App, AppContext, Capabilities};
 pub use builder::{Builder, Plugin};
 pub use clock::{Frame, FrameClock};
+pub use exec::{AsyncConfig, AsyncRuntime, Mailbox, MailboxSender};
 pub use jobs::{JobContext, JobHandle, JobPool};
+pub use log::{FileSink, LogConfig, LogError, Rotation};
 pub use pump::{EventSource, PumpContext, Wakeup};
 pub use window::{Window, WindowRegistry};
 
@@ -50,6 +54,12 @@ pub trait Application: 'static {
   /// 应用标识。平台入口据此算应用目录（见 [`crate::path::Paths::for_app`]），
   /// 日志的默认落点也由它定。
   fn app_id(&self) -> &str;
+
+  /// 日志配置。`None` = 不装全局订阅器（测试友好）。
+  ///
+  /// 平台入口在**装完路径之后**立刻拿它安装——默认落点在应用目录下，先装路径才解析得到
+  /// （见 [`LogConfig`]）。取的是数据，安装动作在入口那一侧。
+  fn log_config(&self) -> Option<&LogConfig>;
 
   /// 启动时要创建的窗口。标签为 `main` 的那个即主窗口。
   fn windows(&self) -> Vec<WindowSpec>;

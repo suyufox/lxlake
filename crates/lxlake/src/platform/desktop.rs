@@ -148,6 +148,7 @@ impl<A: Application> Driver<A> {
         .app
         .context_mut()
         .insert_window(id, &spec.label, Arc::new(DesktopWindow { id, window }));
+      tracing::debug!(window = id.0, label = %spec.label, "建窗");
       self.app.on_window_ready(id);
     }
   }
@@ -156,12 +157,18 @@ impl<A: Application> Driver<A> {
   fn destroy_window(&mut self, id: WindowId) {
     self.window_ids.retain(|(_, contract)| *contract != id);
     self.app.context_mut().remove_window(id);
+    tracing::debug!(window = id.0, "摘窗");
     self.app.on_window_destroyed(id);
   }
 
   /// 出一帧：推进时钟并交给应用。
   fn tick_frame(&mut self, now: Instant) {
     let frame = self.clock.advance(now);
+    tracing::trace!(
+      index = frame.index,
+      delta_ms = frame.delta.as_secs_f64() * 1000.0,
+      "帧"
+    );
     self.app.on_frame(frame);
   }
 
@@ -357,6 +364,13 @@ pub(crate) fn run<A: Application>(app: A) -> Result<(), Error> {
   // 路径先装：应用目录由应用的标识定，之后所有目录判断都走 `crate::path` 这一处
   //（日志的默认落点也靠它）。装在这里是因为入口才知道自己是哪个平台、根在哪。
   crate::path::install(crate::path::Paths::for_app(app.app_id()));
+  // 日志紧跟路径、且在建事件循环之前：默认落点在应用目录下，此刻才解析得出来；
+  // 而窗口与渲染后端初始化阶段的日志也该被捕获（见 runtime::log 的数据与安装分离）。
+  if let Some(config) = app.log_config()
+    && let Err(error) = config.install()
+  {
+    eprintln!("lxlake: {error}");
+  }
 
   let event_loop = EventLoop::<UserEvent>::with_user_event()
     .build()
