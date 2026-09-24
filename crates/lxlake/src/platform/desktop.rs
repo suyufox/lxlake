@@ -6,15 +6,21 @@
 use crate::core::Error;
 use crate::core::event::Event;
 use crate::core::geometry::PhysicalSize;
+use crate::core::input::{Key, MouseButton};
 use crate::core::window::{WindowHandle, WindowId};
 use crate::runtime::{App, AppContext, FrameClock, Wakeup};
+use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize as WinitLogicalSize;
-use winit::event::WindowEvent as WinitWindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::window::{Window, WindowId as WinitWindowId};
+use winit::event::{
+  DeviceEvent, DeviceId, ElementState, MouseButton as WinitMouseButton, MouseScrollDelta,
+  WindowEvent as WinitWindowEvent,
+};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop, EventLoopProxy};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{CursorGrabMode, Window, WindowId as WinitWindowId};
 
 /// 事件循环的用户事件：唯一用途是跨线程唤醒——把运行时的等待打断，让它立刻泵一遍。
 enum UserEvent {
@@ -37,6 +43,22 @@ struct DesktopWindow {
   window: Window,
 }
 
+/// 原生句柄直接转发给内层 winit 窗口。
+///
+/// 这两个 trait 是本层与渲染侧的唯一交接面（见 `core::window`）：渲染拿它建表面，
+/// 全程不必经过 winit 的类型。
+impl HasWindowHandle for DesktopWindow {
+  fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, HandleError> {
+    self.window.window_handle()
+  }
+}
+
+impl HasDisplayHandle for DesktopWindow {
+  fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+    self.window.display_handle()
+  }
+}
+
 impl WindowHandle for DesktopWindow {
   fn id(&self) -> WindowId {
     self.id
@@ -53,6 +75,21 @@ impl WindowHandle for DesktopWindow {
 
   fn set_title(&self, title: &str) {
     self.window.set_title(title);
+  }
+
+  fn set_cursor_grab(&self, grab: bool) {
+    let mode = if grab {
+      CursorGrabMode::Locked
+    } else {
+      CursorGrabMode::None
+    };
+    if let Err(err) = self.window.set_cursor_grab(mode) {
+      eprintln!("lxlake: 光标抓取失败：{err}");
+    }
+  }
+
+  fn set_cursor_visible(&self, visible: bool) {
+    self.window.set_cursor_visible(visible);
   }
 }
 
@@ -150,13 +187,17 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
       return;
     }
     self.started = true;
+    // 原始鼠标位移是设备级事件，得显式声明要。只在窗口有焦点时要——后台不必收。
+    event_loop.listen_device_events(DeviceEvents::WhenFocused);
     self.create_windows(event_loop);
     self.app.on_startup(&mut self.cx);
     self.frame_pending = true;
   }
 
   fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
-    // 唤醒只做一件事：立刻泵一遍事件源——它们可能刚从别的线程拿到结果。
+    // 被别的线程叫醒（作业完成、事件源从别处拿到结果）：补一帧，再泵一遍事件源。
+    // 补帧是必须的——`Wakeup` 的语义就是「立刻醒一次」，只泵源不跑帧等于白醒。
+    self.frame_pending = true;
     self.pump_sources(Instant::now());
   }
 
@@ -203,11 +244,52 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
         window: id,
         focused,
       }),
+      WinitWindowEvent::KeyboardInput { event, .. } => {
+        // 没映射的键直接丢——契约层的键集是收窄的，不是 winit 的镜像。
+        if let Some(key) = translate_key(event.physical_key) {
+          self.emit(Event::KeyboardInput {
+            window: id,
+            key,
+            pressed: event.state == ElementState::Pressed,
+            repeat: event.repeat,
+          });
+        }
+      }
+      WinitWindowEvent::MouseInput { state, button, .. } => {
+        if let Some(button) = translate_button(button) {
+          self.emit(Event::MouseButton {
+            window: id,
+            button,
+            pressed: state == ElementState::Pressed,
+          });
+        }
+      }
+      WinitWindowEvent::MouseWheel { delta, .. } => {
+        let delta = match delta {
+          MouseScrollDelta::LineDelta(x, y) => [x, y],
+          MouseScrollDelta::PixelDelta(position) => [position.x as f32, position.y as f32],
+        };
+        self.emit(Event::MouseWheel { window: id, delta });
+      }
       WinitWindowEvent::CloseRequested => {
         self.emit(Event::CloseRequested { window: id });
         event_loop.exit();
       }
       _ => {}
+    }
+  }
+
+  fn device_event(
+    &mut self,
+    _event_loop: &ActiveEventLoop,
+    _device_id: DeviceId,
+    event: DeviceEvent,
+  ) {
+    // 只取鼠标原始位移：光标位置会撞屏幕边界、还会被系统加速改掉，视角控制不能用它。
+    if let DeviceEvent::MouseMotion { delta } = event {
+      self.emit(Event::MouseMotion {
+        delta: [delta.0 as f32, delta.1 as f32],
+      });
     }
   }
 
@@ -252,4 +334,35 @@ pub(crate) fn run<A: App>(app: A) -> Result<(), Error> {
   driver.close_windows();
 
   result.map_err(|err| Error::Platform(format!("事件循环异常退出：{err}")))
+}
+
+/// 原生键码 → 契约层按键。没收录的返回 `None`（运行时不会派发出去）。
+fn translate_key(physical: PhysicalKey) -> Option<Key> {
+  let PhysicalKey::Code(code) = physical else {
+    // 按布局位置而非物理键位报上来的键，本层不认。
+    return None;
+  };
+  Some(match code {
+    KeyCode::KeyW => Key::W,
+    KeyCode::KeyA => Key::A,
+    KeyCode::KeyS => Key::S,
+    KeyCode::KeyD => Key::D,
+    KeyCode::KeyQ => Key::Q,
+    KeyCode::KeyE => Key::E,
+    KeyCode::Space => Key::Space,
+    KeyCode::ShiftLeft | KeyCode::ShiftRight => Key::Shift,
+    KeyCode::ControlLeft | KeyCode::ControlRight => Key::Control,
+    KeyCode::Escape => Key::Escape,
+    _ => return None,
+  })
+}
+
+/// 原生鼠标键 → 契约层鼠标键。侧键一类不收录。
+fn translate_button(button: WinitMouseButton) -> Option<MouseButton> {
+  Some(match button {
+    WinitMouseButton::Left => MouseButton::Left,
+    WinitMouseButton::Right => MouseButton::Right,
+    WinitMouseButton::Middle => MouseButton::Middle,
+    _ => return None,
+  })
 }

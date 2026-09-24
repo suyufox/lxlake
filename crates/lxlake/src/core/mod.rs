@@ -6,6 +6,7 @@
 
 pub mod event;
 pub mod geometry;
+pub mod input;
 pub mod window;
 
 use std::fmt;

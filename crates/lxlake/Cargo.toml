@@ -22,6 +22,16 @@ winit = "0.30.13"
 wgpu = { version = "30", optional = true }
 naga = { version = "30", optional = true }
 
+# raw-window-handle 是**中性 ABI 契约**，不是 winit / wgpu 的类型：`core::window::WindowHandle`
+# 拿它表达「我能给出原生窗口句柄」，渲染侧因此能直接建表面而不必认识 winit。winit 与 wgpu
+# 本来就用它，依赖图上零增量。
+raw-window-handle = "0.6"
+# 顶点 / uniform 的字节视图：CPU 结构与 GPU 布局的对照由 `Pod` 在编译期锁住。
+# wgpu 自己就依赖它，开渲染时依赖图上零增量；不开渲染则连它一起省掉（见 `meshing::Vertex`）。
+bytemuck = { version = "1", features = ["derive"], optional = true }
+glam = "0.33.9"
+crossbeam-deque = "0.8.8"
+
 [features]
 default = []
-render = ["dep:wgpu", "dep:naga"]
+render = ["dep:wgpu", "dep:naga", "dep:bytemuck"]
