@@ -1,0 +1,69 @@
+# 仓库内统一按 LF 存储，检出时也不做换行符转换。
+# 这样 Windows 与 macOS/Linux 协作者得到一致的文件内容。
+* text=auto eol=lf
+
+# ---------------------------------------------------------------
+# 文本文件：显式声明为文本并使用 LF
+# 显式声明可以避免 git 的自动探测在个别文件上判断失误
+# ---------------------------------------------------------------
+*.rs      text eol=lf
+*.toml    text eol=lf
+*.lock    text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.jsonc   text eol=lf
+*.js      text eol=lf
+*.jsx     text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.mjs     text eol=lf
+*.cjs     text eol=lf
+*.css     text eol=lf
+*.scss    text eol=lf
+*.html    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.sh      text eol=lf
+*.sql     text eol=lf
+
+# ---------------------------------------------------------------
+# Windows 脚本保留 CRLF
+# ---------------------------------------------------------------
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# ---------------------------------------------------------------
+# 二进制文件：禁止任何换行符转换
+# ---------------------------------------------------------------
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.webp    binary
+*.ico     binary
+*.pdf     binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.otf     binary
+*.zip     binary
+*.gz      binary
+*.wasm    binary
+
+# ---------------------------------------------------------------
+# 标记为生成物，避免被计入仓库语言统计 / 折叠 diff
+# ---------------------------------------------------------------
+Cargo.lock      linguist-generated
+pnpm-lock.yaml  linguist-generated
+target/**       linguist-vendored
+node_modules/** linguist-vendored
+
+# ---------------------------------------------------------------
+# git archive 导出时排除开发专用配置
+# ---------------------------------------------------------------
+/.github/       export-ignore
+/.husky/        export-ignore
+/.gitattributes export-ignore
+/.gitignore     export-ignore
+/.editorconfig  export-ignore
