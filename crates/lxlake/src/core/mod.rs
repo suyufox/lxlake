@@ -4,6 +4,7 @@
 //! 契约层一旦出现这些类型，框架主线就再也无法在不启用渲染的情况下干净编译
 //! （见 `docs/architecture.md` 分层）。
 
+pub mod command;
 pub mod event;
 pub mod geometry;
 pub mod input;

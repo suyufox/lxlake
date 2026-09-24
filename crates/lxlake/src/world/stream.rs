@@ -1,15 +1,21 @@
-//! 区块流式：视距内异步生成 / 网格化，出视距卸载。
+//! 区块流式：视距内异步生成 / 网格化，出视距卸载，**被改过的区块回头重算**。
 //!
-//! **本层是世界唯一的写者**，且只在帧边界写（`update` 的调用点）。一个区块的生命周期：
+//! **本层是世界唯一的写者**（区块的增删），且只在帧边界写（`update` 的调用点）。一个区块的
+//! 生命周期：
 //!
 //! ```text
 //!   申请 ──→ Generating ──→ PendingMesh ──→ Meshing ──→ Ready ──→ 卸载
 //!           生成作业在跑    等邻居就位      网格化作业在跑   世界+GPU 都就位
+//!                                              ↑            │
+//!                                              └──── 标脏 ───┘
 //! ```
 //!
 //! - 网格化前要确认**此刻视距内的六个邻居都已进世界**：这样每块只网格化一次，不必等邻居
 //!   补齐再回头重算。视距外的邻居按空气处理——那边本就没有地形，越界那面照常长出来
 //!   （岛顶、岛底的收口面全靠它）；相机移过去后真实邻居会把它挡成内面，看不见
+//! - **M1 是单向流，M2 给槽位加了「脏」状态**：方块被改 → 标脏 → 下一轮重新提交网格化作业
+//!   （吃的是**此刻**的邻域快照）→ 收割后走 `Renderer::upload` 覆盖上传。作业在跑的时候又被
+//!   改，那份结果按「旧了」处理：再排一次（见 `Slot::reap`）
 //! - 卸载是**同步**的：摘除区块立刻发生，作业结果回来的话在主线程丢弃（顺带 cancel）
 //! - 网格化结果经 [`StreamOutput`] 交给渲染侧：本层不认识 GPU
 
@@ -56,7 +62,10 @@ impl StreamBounds {
 /// 本帧的流式产出：帧边界上交给渲染侧的东西。
 #[derive(Debug, Default)]
 pub struct StreamOutput {
-  /// 本帧新网格化完成、待上传 GPU 的区块。
+  /// 本帧待上传 GPU 的区块网格：新网格化的，以及**重算过的**（渲染侧按 pos 覆盖上传）。
+  ///
+  /// 全空气的区块也会出现在这里（空网格）：`Renderer::upload` 对空网格就是回收资源，方块被
+  /// 挖光的区块正需要这一下。
   pub meshed: Vec<ChunkMesh>,
   /// 本帧已卸载的区块：渲染侧要丢掉对应的 GPU 资源。
   pub unloaded: Vec<ChunkPos>,
@@ -72,7 +81,26 @@ pub struct ChunkStreamer {
 }
 
 /// 一个区块在流水线上的位置。
-enum Slot {
+struct Slot {
+  state: SlotState,
+  /// 方块被改过：手里的几何旧了，等作业腾出手来重算。
+  ///
+  /// 提交网格化作业时清掉、结果回来时若又被改过就重新置上——「脏」表达的是「此刻的几何不是
+  /// 世界的样子」，与作业在不在跑无关。
+  dirty: bool,
+}
+
+impl Slot {
+  fn new(state: SlotState) -> Self {
+    Self {
+      state,
+      dirty: false,
+    }
+  }
+}
+
+/// 槽位的状态。
+enum SlotState {
   /// 生成作业在跑。
   Generating(JobHandle<Chunk>),
   /// 区块已进世界，但邻居还没齐，暂不网格化。
@@ -81,6 +109,41 @@ enum Slot {
   Meshing(JobHandle<ChunkMesh>),
   /// 世界与渲染两侧都已就位。
   Ready,
+}
+
+impl Slot {
+  /// 收割一个已完成的作业；还没完成就什么都不做。
+  fn reap(&mut self, world: &mut World, output: &mut StreamOutput) {
+    let next = match &mut self.state {
+      SlotState::Generating(handle) => match handle.poll() {
+        Some(chunk) => {
+          world.insert(Arc::new(chunk));
+          // 进世界了，但能不能网格化还得看邻居（见 `neighbors_ready`）。
+          Some(SlotState::PendingMesh)
+        }
+        None => None,
+      },
+      SlotState::Meshing(handle) => match handle.poll() {
+        Some(mesh) => {
+          // 空网格也交出去：`Renderer::upload` 对空网格就是回收。方块被挖光的区块得把旧的
+          // 那份几何撤掉——M1 的「空网格不必交给渲染侧」到 M2 就不成立了。
+          output.meshed.push(mesh);
+          // 作业跑着的时候又被改过：手里这份结果已经旧了，退回待网格化再排一次。
+          Some(if self.dirty {
+            SlotState::PendingMesh
+          } else {
+            SlotState::Ready
+          })
+        }
+        None => None,
+      },
+      SlotState::PendingMesh | SlotState::Ready => None,
+    };
+
+    if let Some(next) = next {
+      self.state = next;
+    }
+  }
 }
 
 impl ChunkStreamer {
@@ -105,6 +168,18 @@ impl ChunkStreamer {
     self.slots.len()
   }
 
+  /// 标脏：这些区块的方块被改过，几何要重算。
+  ///
+  /// 只认流水线上的区块——视距外的本就该卸载，改了也留不住。真正的重算发生在下一轮 `update`
+  /// 的 [`ChunkStreamer::mesh_ready`]：作业要重新吃一遍**此刻**的邻域快照。
+  pub fn mark_dirty(&mut self, positions: &[ChunkPos]) {
+    for pos in positions {
+      if let Some(slot) = self.slots.get_mut(pos) {
+        slot.dirty = true;
+      }
+    }
+  }
+
   /// 帧边界调用一次：补申请 → 收割结果 → 卸载出视距的。
   pub fn update(
     &mut self,
@@ -117,7 +192,7 @@ impl ChunkStreamer {
     output.unloaded.clear();
 
     // 顺序有讲究：先收结果（生成好的装进世界），再卸载，再申请，最后网格化——这样本帧刚
-    // 进世界的区块本帧就能进网格化队列，只要它的邻居已经在位。
+    // 进世界的区块本帧就能进网格化队列，只要它的邻居已经在位；本帧刚标脏的区块同理。
     self.reap(world, output);
     self.unload(world, focus, output);
     self.request(pool, focus);
@@ -127,25 +202,7 @@ impl ChunkStreamer {
   /// 收割已完成的作业：生成完的装进世界，网格化完的交给渲染侧。
   fn reap(&mut self, world: &mut World, output: &mut StreamOutput) {
     for slot in self.slots.values_mut() {
-      match slot {
-        Slot::Generating(handle) => {
-          if let Some(chunk) = handle.poll() {
-            world.insert(Arc::new(chunk));
-            // 进世界了，但能不能网格化还得看邻居（见 `neighbors_ready`）。
-            *slot = Slot::PendingMesh;
-          }
-        }
-        Slot::Meshing(handle) => {
-          if let Some(mesh) = handle.poll() {
-            // 空网格不必交给渲染侧：没有顶点就没有 GPU 资源要建。
-            if !mesh.is_empty() {
-              output.meshed.push(mesh);
-            }
-            *slot = Slot::Ready;
-          }
-        }
-        Slot::PendingMesh | Slot::Ready => {}
-      }
+      slot.reap(world, output);
     }
   }
 
@@ -157,10 +214,10 @@ impl ChunkStreamer {
         return true;
       }
       // 协作式取消：作业可能刚好跑完，结果没人取就地丢弃——这正是想要的。
-      match slot {
-        Slot::Generating(handle) => handle.cancel(),
-        Slot::Meshing(handle) => handle.cancel(),
-        Slot::PendingMesh | Slot::Ready => {}
+      match &slot.state {
+        SlotState::Generating(handle) => handle.cancel(),
+        SlotState::Meshing(handle) => handle.cancel(),
+        SlotState::PendingMesh | SlotState::Ready => {}
       }
       world.remove(pos);
       output.unloaded.push(pos);
@@ -191,17 +248,27 @@ impl ChunkStreamer {
       // 生成是纯函数：作业只带走 (seed, palette, pos)，摸不到世界。
       let generator = self.generator;
       let handle = pool.spawn(move |_cx: &JobContext<'_>| generator.generate(pos));
-      self.slots.insert(pos, Slot::Generating(handle));
+      self
+        .slots
+        .insert(pos, Slot::new(SlotState::Generating(handle)));
     }
   }
 
-  /// 给邻居已就位的区块提交网格化作业。
+  /// 给该网格化（或该重算）的区块提交网格化作业。
   fn mesh_ready(&mut self, world: &World, pool: &JobPool, focus: ChunkPos) {
     // 先收集再改 map：边遍历边插入会破坏借用。
     let pending: Vec<ChunkPos> = self
       .slots
       .iter()
-      .filter(|(_, slot)| matches!(slot, Slot::PendingMesh))
+      .filter(|(_, slot)| match slot.state {
+        // 刚进世界：还没网格化过。
+        SlotState::PendingMesh => true,
+        // 方块被改过：手里这份几何旧了。
+        SlotState::Ready => slot.dirty,
+        // 作业在跑：等它回来（回来时若还脏，会退回待网格化，见 `Slot::reap`）——在这里再排
+        // 一次只会让同一区块有两份在跑的结果打架。
+        SlotState::Generating(_) | SlotState::Meshing(_) => false,
+      })
       .map(|(&pos, _)| pos)
       .collect();
 
@@ -210,6 +277,7 @@ impl ChunkStreamer {
         continue;
       }
       // 中心必然在世界上（`PendingMesh` 就是「刚装进世界」的意思）；真取不到就留到下一帧。
+      // 重算的区块也走这里：快照是**此刻**的，所以吃得到刚改过的方块。
       let Some(neighborhood) = world.neighborhood(pos) else {
         continue;
       };
@@ -217,7 +285,10 @@ impl ChunkStreamer {
       let blocks = world.registry_handle();
       let handle =
         pool.spawn(move |_cx: &JobContext<'_>| crate::meshing::mesh_chunk(&neighborhood, &blocks));
-      self.slots.insert(pos, Slot::Meshing(handle));
+      let slot = self.slots.get_mut(&pos).expect("刚遍历出来的区块");
+      slot.state = SlotState::Meshing(handle);
+      // 脏在这里清掉：这份作业吃的是此刻的快照。跑着的时候再被改，脏会重新置上。
+      slot.dirty = false;
     }
   }
 
@@ -245,7 +316,7 @@ fn chunk_distance_sq(a: ChunkPos, b: ChunkPos) -> i64 {
 mod tests {
   use super::*;
   use crate::runtime::Wakeup;
-  use crate::world::block::{BlockDef, BlockPalette, BlockRegistry, FaceTiles};
+  use crate::world::block::{BlockDef, BlockId, BlockPalette, BlockRegistry, FaceTiles};
   use std::time::{Duration, Instant};
 
   /// 不做任何事的唤醒：单测只看世界与产出，不关心主循环有没有被打断。
@@ -279,11 +350,11 @@ mod tests {
 
   /// 诊断用：槽位状态名。
   fn slot_name(slot: &Slot) -> &'static str {
-    match slot {
-      Slot::Generating(_) => "generating",
-      Slot::PendingMesh => "pending",
-      Slot::Meshing(_) => "meshing",
-      Slot::Ready => "ready",
+    match slot.state {
+      SlotState::Generating(_) => "generating",
+      SlotState::PendingMesh => "pending",
+      SlotState::Meshing(_) => "meshing",
+      SlotState::Ready => "ready",
     }
   }
 
@@ -312,7 +383,7 @@ mod tests {
       let busy = streamer
         .slots
         .values()
-        .any(|slot| matches!(slot, Slot::Generating(_) | Slot::Meshing(_)));
+        .any(|slot| matches!(slot.state, SlotState::Generating(_) | SlotState::Meshing(_)));
       if !busy {
         return merged;
       }
@@ -356,7 +427,7 @@ mod tests {
       streamer
         .slots
         .values()
-        .all(|slot| matches!(slot, Slot::Ready)),
+        .all(|slot| matches!(slot.state, SlotState::Ready)),
       "邻居都在位的区块该全部走完网格化"
     );
     assert!(!output.meshed.is_empty(), "岛内区块该产出几何体");
@@ -386,7 +457,10 @@ mod tests {
     let output = settle(&mut streamer, &mut world, &pool, focus);
 
     assert_eq!(streamer.tracked(), 1);
-    assert!(matches!(streamer.slots.get(&focus), Some(Slot::Ready)));
+    assert!(matches!(
+      streamer.slots.get(&focus).map(|slot| &slot.state),
+      Some(SlotState::Ready)
+    ));
     // 这块整块埋在岛里（世界 y -32..-1），里面没有面可画，只有六个边界面。
     let mesh = output.meshed.first().expect("岛内区块该产出几何体");
     assert_eq!(mesh.pos, focus);
@@ -462,5 +536,75 @@ mod tests {
 
     let after = world.chunk(sample).expect("回来后又该有").blocks();
     assert_eq!(before, after, "同 seed 同 pos：卸载再加载不丢形状");
+  }
+
+  /// 产出的网格里找某区块那份（同一区块至多一份，倒着找只是图省事）。
+  fn mesh_of(meshes: &[ChunkMesh], pos: ChunkPos) -> Option<&ChunkMesh> {
+    meshes.iter().rev().find(|mesh| mesh.pos == pos)
+  }
+
+  #[test]
+  fn marking_a_chunk_dirty_remeshes_it() {
+    let (mut world, generator) = world_and_generator(7);
+    let pool = pool(4);
+    // 单层、整层埋在岛里（世界 y −32..−1）：深处全是实心，好构造一块「内部方块」。
+    let bounds = StreamBounds {
+      radius: 1,
+      min_y: -1,
+      max_y: -1,
+    };
+    let mut streamer = ChunkStreamer::new(bounds, generator);
+    let focus = ChunkPos::new(0, -1, 0);
+    let first = settle(&mut streamer, &mut world, &pool, focus);
+
+    // 区块正中那块：离每个面都远，改动不牵动邻居。
+    let pos = ChunkPos::new(0, -1, 0);
+    let origin = pos.origin();
+    let target = [origin[0] + 16, origin[1] + 16, origin[2] + 16];
+    assert!(world.is_solid(target), "岛内深处该是实心");
+
+    let touched = world.set_block(target, BlockId::AIR);
+    assert_eq!(touched, vec![pos], "深处的改动只关这一块");
+
+    streamer.mark_dirty(&touched);
+    let second = settle(&mut streamer, &mut world, &pool, focus);
+
+    let remeshed: Vec<ChunkPos> = second.meshed.iter().map(|mesh| mesh.pos).collect();
+    assert_eq!(remeshed, vec![pos], "只有标脏的那块该重算并再交一份网格");
+    assert!(second.unloaded.is_empty(), "重算不该顺手卸载");
+    let before = mesh_of(&first.meshed, pos).expect("首轮该网格化过这块");
+    let after = mesh_of(&second.meshed, pos).expect("重算后该再交一份");
+    assert_ne!(before, after, "挖掉一块后几何该变");
+  }
+
+  #[test]
+  fn a_border_edit_remeshes_the_face_neighbour_too() {
+    let (mut world, generator) = world_and_generator(7);
+    let pool = pool(4);
+    let bounds = StreamBounds {
+      radius: 1,
+      min_y: -1,
+      max_y: -1,
+    };
+    let mut streamer = ChunkStreamer::new(bounds, generator);
+    let focus = ChunkPos::new(0, -1, 0);
+    settle(&mut streamer, &mut world, &pool, focus);
+
+    // x 落在区块的负向面上（local x = 0），面内取正中——免得再牵出 y / z 两个邻居。
+    let pos = ChunkPos::new(0, -1, 0);
+    let origin = pos.origin();
+    let target = [origin[0], origin[1] + 16, origin[2] + 16];
+    let touched = world.set_block(target, BlockId::AIR);
+    let neighbour = pos.offset([-1, 0, 0]);
+    assert_eq!(touched, vec![pos, neighbour]);
+
+    streamer.mark_dirty(&touched);
+    let second = settle(&mut streamer, &mut world, &pool, focus);
+
+    let mut remeshed: Vec<ChunkPos> = second.meshed.iter().map(|mesh| mesh.pos).collect();
+    remeshed.sort_by_key(|pos| (pos.x, pos.y, pos.z));
+    let mut expected = touched.clone();
+    expected.sort_by_key(|pos| (pos.x, pos.y, pos.z));
+    assert_eq!(remeshed, expected, "本体与贴面的邻居都该重算");
   }
 }

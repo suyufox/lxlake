@@ -55,8 +55,10 @@ impl ChunkPos {
 
 /// 区块：`CHUNK_SIZE³` 个方块。
 ///
-/// 生成阶段用 `&mut self` 的 [`Chunk::set`] 填数据；填完装进 [`Arc`] 就再没人能改它
-/// （世界侧只拿 `Arc`，`Arc::get_mut` 拿不到独占就当不可变处理）。
+/// **不可变是相对于共享而言的**：装进世界后世界持 `Arc<Chunk>`，跑着的作业拿克隆句柄，谁也
+/// 改不到同一份数据。要改方块就走 **copy-on-write**——clone 出一份新快照、在**独占的新份**上
+/// [`Chunk::set`]，再替换世界里的句柄（见 `world::World::set_block`）；旧快照对读者始终
+/// 自洽，跑着的作业读到的永远是完整的一版。
 #[derive(Debug, Clone)]
 pub struct Chunk {
   pos: ChunkPos,
@@ -113,7 +115,8 @@ impl Chunk {
     self.blocks[Self::index(local)]
   }
 
-  /// 写一个方块（**只在生成阶段**用；区块装进世界后不再可变）。
+  /// 写一个方块。生成阶段用它填全新区块；M2 之后也用在 **copy-on-write 出来的独占快照**上
+  /// （世界里的那份 `Arc` 从不原地改）。
   pub fn set(&mut self, local: [usize; 3], id: BlockId) {
     let index = Self::index(local);
     let previous = self.blocks[index];

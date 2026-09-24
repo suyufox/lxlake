@@ -1,8 +1,13 @@
-//! 自由飞行相机：M1 唯一的输入消费方，无碰撞、无重力。
+//! 自由飞行相机：无重力、无玩家控制器，位移是否撞墙由调用方决定。
 //!
 //! 与输入契约的分界：相机**不认识按键、不认识窗口事件**，只吃已经映射好的轴值。
 //! 「W → `forward = 1`」这类映射属于应用 / 输入层，相机只管「轴值 + 鼠标位移 → 变换」。
 //! 这样改键位、加手柄、将来做 HUD 都碰不到相机代码。
+//!
+//! **转向与位移是分开的两件事**（M2）：一次推进被拆成 [`FlyCamera::look`]（鼠标 → 朝向）与
+//! [`FlyCamera::desired_delta`] + [`FlyCamera::translate`]（轴值 → 位移 → 落位）。中间那一步是
+//! 留给调用方的：把 `desired_delta` 先过一遍碰撞夹紧，再 `translate` 夹紧后的量——相机因此不必
+//! 认识世界，撞墙就停的手感由应用侧接线。老接口 [`FlyCamera::update`] 就是这两步直连。
 //!
 //! 数学边界一律用 `[f32; N]` / 列主序矩阵这层 POD——相机不把任何数学库的类型漏到接口上。
 //! 内部算矩阵用 glam，出了这个文件就只剩数组。
@@ -98,14 +103,31 @@ impl FlyCamera {
     self.sensitivity = sensitivity;
   }
 
-  /// 每帧推进：先吃掉本帧的鼠标位移（转 yaw / pitch），再按轴值平移。
+  /// 每帧推进：转向 + 位移**直连**（不做碰撞夹紧）。
+  ///
+  /// 需要撞墙就停的应用（demo 就是）别用它，改成自己接线 [`FlyCamera::look`] +
+  /// [`FlyCamera::desired_delta`] → 夹紧 → [`FlyCamera::translate`]。
   ///
   /// `dt` 是秒——位移按时间积分，帧率高低不影响飞行手感。
   pub fn update(&mut self, input: &CameraInput, dt: f32) {
-    self.yaw += input.look[0] * self.sensitivity;
-    // 屏幕 y 向下为正，而 pitch 向上为正，所以这里是减。
-    self.pitch = (self.pitch - input.look[1] * self.sensitivity).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    self.look(input.look);
+    let delta = self.desired_delta(input, dt);
+    self.translate(delta);
+  }
 
+  /// 吃掉本帧的鼠标位移：转 yaw / pitch。
+  ///
+  /// 屏幕 y 向下为正，而 pitch 向上为正，所以俯仰那一项是减。
+  pub fn look(&mut self, delta: [f32; 2]) {
+    self.yaw += delta[0] * self.sensitivity;
+    self.pitch = (self.pitch - delta[1] * self.sensitivity).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+  }
+
+  /// 本帧**想要**走的位移（世界坐标，方块）：按轴值沿视线方向积分，`input.look` 不参与。
+  ///
+  /// 这是「想过一遍碰撞再落位」的那一半——返回值可能被夹掉一部分，实际走了多少由
+  /// [`FlyCamera::translate`] 决定。
+  pub fn desired_delta(&self, input: &CameraInput, dt: f32) -> [f32; 3] {
     let axis =
       self.forward_vec() * input.forward + self.right_vec() * input.right + Vec3::Y * input.up;
     let speed = if input.boost {
@@ -115,10 +137,15 @@ impl FlyCamera {
     };
 
     // 归一化后再乘速度：斜着飞（前进 + 平移）不会比直着飞更快。
-    if let Some(direction) = axis.try_normalize() {
-      let moved = Vec3::from_array(self.position) + direction * speed * dt;
-      self.position = moved.to_array();
+    match axis.try_normalize() {
+      Some(direction) => (direction * speed * dt).to_array(),
+      None => [0.0; 3],
     }
+  }
+
+  /// 按位移落位。传入的应当是**已经被夹紧过**的位移（见 [`FlyCamera::desired_delta`]）。
+  pub fn translate(&mut self, delta: [f32; 3]) {
+    self.position = (Vec3::from_array(self.position) + Vec3::from_array(delta)).to_array();
   }
 
   /// 前方向单位向量。
@@ -287,6 +314,44 @@ mod tests {
     let position = camera.position();
     assert!(close(position[0], 0.0) && close(position[2], 0.0));
     assert!(close(position[1], camera.speed()));
+  }
+
+  #[test]
+  fn desired_delta_ignores_the_look_axis() {
+    let camera = FlyCamera::new([0.0; 3]);
+    let input = CameraInput {
+      forward: 1.0,
+      look: [50.0, 50.0],
+      ..CameraInput::default()
+    };
+
+    // 转向不该混进位移：位移只看轴值。
+    let delta = camera.desired_delta(&input, 1.0);
+    assert!(close3(delta, [0.0, 0.0, -camera.speed()]));
+  }
+
+  #[test]
+  fn look_and_translate_compose_to_update() {
+    let input = CameraInput {
+      forward: 1.0,
+      right: -1.0,
+      up: 1.0,
+      boost: true,
+      look: [12.0, -7.0],
+    };
+
+    let mut whole = FlyCamera::new([1.0, 2.0, 3.0]);
+    whole.update(&input, 0.5);
+
+    // 拆开的两步按同样顺序走，结果必须一模一样——demo 走的就是这条路。
+    let mut split = FlyCamera::new([1.0, 2.0, 3.0]);
+    split.look(input.look);
+    let delta = split.desired_delta(&input, 0.5);
+    split.translate(delta);
+
+    assert!(close(split.yaw(), whole.yaw()));
+    assert!(close(split.pitch(), whole.pitch()));
+    assert!(close3(split.position(), whole.position()));
   }
 
   #[test]

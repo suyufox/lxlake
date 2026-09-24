@@ -5,8 +5,8 @@
 | 里程碑      | 交付                                             | 状态         |
 | ----------- | ------------------------------------------------ | ------------ |
 | M0 地基     | 空窗口 + 帧循环 + 外部事件源 pump 钩子的**接口** | 已交付       |
-| M1 空岛只读 | 飞着看一座浮岛，区块流式加载不掉帧               | **当前目标** |
-| M2 交互     | 体素碰撞 + 射线破坏/放置 + 命令流                | 未开始       |
+| M1 空岛只读 | 飞着看一座浮岛，区块流式加载不掉帧               | 已交付       |
+| M2 交互     | 体素碰撞 + 射线破坏/放置 + 命令流                | **当前目标** |
 | M3 HUD      | 自绘 UI 第一刀 + 覆盖层的 z 序与输入穿透         | 未开始       |
 | M4 存档     | 世界序列化，退出再进岛还在                       | 未开始       |
 
@@ -33,7 +33,7 @@
 
 **已交付**：`core` / `runtime` / `platform` / `render` 骨架就位，`#[lxlake::entry]` 可用。demo 实测稳定 60fps，resize 响应正确；`cargo build -p lxlake-editor` 的依赖图里 wgpu / naga 出现 **0 次**。外部事件源 / pump 交的是**接口 + 调度**（源声明截止时间、运行时按最早者设 `WaitUntil`；跨线程唤醒走 `EventLoopProxy`），不含任何 wry / CEF 实现——webview 线的第一件事就是拿它核对 ~10ms 泵的语义。
 
-## M1 空岛只读（当前目标）
+## M1 空岛只读
 
 **代码已全部落位，实机已跑通**：`runtime::jobs`（工作窃取池 + poll 句柄 + 帧边界收结果）、
 `world`（方块注册表 / 32³ 区块 / 浮岛生成 / 区块流式与生命周期状态机）、`meshing`（POD 顶点 +
@@ -92,7 +92,19 @@ wgpu / naga / bytemuck 出现 **0 次**（bytemuck 随 `render` 特性分档）�
 
 NPR 部分在 M1 只留一个 ramp 光照 / 边缘光的开关，验证「能叠上去」，不追求好看。复刻原版方块游戏光照被否决——快，但对渲染主线的能力几乎没有验证价值。
 
-## M2 交互（下一步）
+## M2 交互（当前目标）
+
+**代码已全部落位，按包验证已通过**：`world::collision`（AABB 扫掠，沿轴分离）、`world::raycast`
+（DDA 步进射线，返回命中方块 + 命中面）、`core::command` 与 `core::input`（意图 / 命令 / 键位表）、
+`world` 的 copy-on-write 写方块与流式槽位脏状态（标脏 → 重算 → 覆盖上传）、`camera` 的
+转向 / 位移拆分，以及 `lxlake-demo` 的接线（左键破坏 / 右键放置、位移先过一遍碰撞夹紧、
+`HeldKeys` 收成键位表）。命令序列每帧打到 stdout（验收第 4 条）。
+
+验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 69 项、`--features render` 78 项全绿；
+`lxlake` / `lxlake-macros` / `lxlake-demo` / `lxlake-editor` 的 `clippy --all-targets -D warnings`
+与 `cargo fmt --check` 无告警；`cargo build -p lxlake-editor` 的依赖图里 wgpu / naga / bytemuck
+仍是 **0 次**（验收第 5 条）。剩下的是**实机看一眼**：对着地形点左键 / 右键，画面下一帧更新、
+帧时间不掉。
 
 一行摘要见上面的表：体素碰撞 + 射线破坏/放置 + 命令流。要逼出的三样是**命令契约**、**世界可变性**、
 **输入与模拟的分界**，下面把它们各自落成具体设计。
