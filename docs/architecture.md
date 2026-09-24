@@ -115,6 +115,34 @@ plugin      = ["dep:wasmtime", "dep:wit-bindgen"]
 
 所以约定是：**CI 与本地一律按包构建，不跑 `--workspace`**。这条约定替代了「为了隔离而拆 crate」。
 
+## 发行物形状
+
+运行时目录的形状**模仿 Unity，但代码分层不模仿**：
+
+```text
+lxlake-demo.exe        主 bin
+data/                  引擎资产：locale/ models/ textures/ shaders/
+native/                经 vcpkg 引入的 C 依赖动态库，各自成目录
+  cef/                 libcef.dll + resources/ + locales/（CEF 自带目录结构）
+  ffmpeg/              av*.dll（仅 cef-ffmpeg 发行物）
+plugins/               插件位：经那条窄 C ABI 加载
+```
+
+两件事要分清，混起来就会走进「为了打包好看而改分层」的坑：
+
+- **引擎自己的分层不进动态库**。内部一律 rlib 静态链接（全量单态化 + 跨 crate LTO）；`dylib` 不用于分发
+  ——它不打包 std、须随附与编译器精确匹配的 `std-<hash>`，且跨边界完全无法 LTO。Unity 的「main bin +
+  一堆 dll」是 C++ 引擎预编译 + 脚本程序集的产物，不是一种可选形状。
+- **动态库只出现在两处**：`native/` 下的 C 依赖，以及 `plugins/` 的插件位。
+
+`native/` 从 vcpkg 方向引入，因此**要随发行物出 dll 的依赖，vcpkg triplet 必须是动态档**——静态 triplet
+根本不会产生可随附的 dll。CEF 没有静态选项，必须走这条路；ffmpeg 可静可动，留到打包时再定。GPL 隔离
+照旧：`cef-ffmpeg` 是单独发行物，默认发行物的 `native/ffmpeg/` 不存在。
+
+`data/` 与 `plugins/` 的落地依赖**资产管线**（本地化、模型、纹理的外部文件），目前一条都没有：M1 的
+图集是程序化生成的、几何是噪声密度场算出来的，全项目没有一个外部资产文件。见[路线图](roadmap.md)的
+资产管线一节。
+
 ## 任务与异步
 
 **帧循环拥有等待权，异步只是租客。** 事件循环怎么等待由平台决定（winit 的 `ControlFlow::WaitUntil`），任何异步机制都不得在主线程上与它争抢 park。参考项目 `luoxinglake` 的坑与选择也落在这条上：它的 tokio 跑在**独立 worker 线程**，主线程留给窗口系统。
