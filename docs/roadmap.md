@@ -35,6 +35,34 @@
 
 ## M1 空岛只读（当前目标）
 
+**代码已全部落位，实机已跑通**：`runtime::jobs`（工作窃取池 + poll 句柄 + 帧边界收结果）、
+`world`（方块注册表 / 32³ 区块 / 浮岛生成 / 区块流式与生命周期状态机）、`meshing`（POD 顶点 +
+greedy meshing）、`camera`（只吃轴值的自由飞行相机）、`render`（wgpu 30 设备与表面 / 程序化
+图集 / 主光路 + 阴影两条管线 / 顶点上传与回收）、`lxlake-demo`（接线）。线程模型与数据所有权见
+[架构](architecture.md) 的「世界与区块」。
+
+按包验证（**不跑 `--workspace`**）已通过：`cargo test -p lxlake --features render` 39 项全绿
+（含 render 的布局对照、光投影稳定性、图集扰动值域），`cargo clippy -p lxlake --all-features --all-targets`
+与 demo / editor 的 clippy、`cargo fmt --check` 均无告警；`cargo build -p lxlake-editor` 的依赖图里
+wgpu / naga / bytemuck 出现 **0 次**（bytemuck 随 `render` 特性分档）。剩下的是**实机看一眼**：
+窗口里的画面、帧率与流式进度（标题栏每秒刷新）。
+
+### 实机第一跑踩到的三件事
+
+首次实机运行连破三个问题，都值得记下来，因为它们各自暴露了一类以后会反复遇到的坑：
+
+1. **图形后端在 Windows 上只开 D3D12**。这台机器的 Intel Gen9 Vulkan 驱动一进
+   `adapter.request_device` 就 AV 崩掉进程（`0xc0000005`，无任何输出）。多开一个后端换不来任何
+   东西，只会换来「在谁的机器上崩、为什么崩」这种排查成本——所以 `render` 里硬编码
+   `Backends::DX12`。另外 `InstanceDescriptor::new_without_display_handle()` **不读
+   `WGPU_BACKEND` 环境变量**，靠环境变量换后端是无效的。
+2. **同一 render pass 内，一张纹理不能既是深度附件又是着色器资源**。阴影 pass 里阴影贴图正被
+   当深度附件写，就不能同时在绑定里当资源读——即使那条绑定在 layout 里只声明了片元可见性。
+   修法是绑定拆两组：0 号组只有全局 uniform（阴影 pass 也要光矩阵），1 号组是图集与阴影贴图
+   （只给主管线）。
+3. **`Queue::write_buffer` 要求缓冲带 `COPY_DST`**。`create_buffer` 的调用方只声明它**用**这份
+   缓冲干什么（顶点 / 索引），灌数据那一侧的用途由 `create_buffer` 统一补上。
+
 ### 做
 
 - **世界**：体素区块 + 方块注册表 + 噪声/3D 密度场生成的浮岛，固定种子
