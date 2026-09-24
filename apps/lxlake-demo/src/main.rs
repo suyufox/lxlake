@@ -1,8 +1,10 @@
 //! lxlake-demo：引擎侧应用。
 //!
 //! M1 的内容是**一座浮空岛**：自由飞行相机 + 区块流式生成 + wgpu 渲染。M2 加上**交互**：
-//! 射线破坏 / 放置 + 碰撞夹紧。三者都来自引擎，本文件只做「接线」——把事件翻译成意图、把意图
-//! 解析成命令、把流式产出交给渲染器，不实现任何算法。
+//! 射线破坏 / 放置 + 碰撞夹紧。M3 加上**自绘 HUD**：左上角一块信息面板 + 屏幕中央的准星，
+//! 外加一块 Tab 打开的调试面板——自绘 UI 第一次**抢输入**（闸口见 `ui_owns_control`）。
+//! 三者都来自引擎，本文件只做「接线」——把事件翻译成意图、把意图解析成命令、把流式产出交给
+//! 渲染器、把排版交给 UI，不实现任何算法。
 //!
 //! 键位是一张**键位表**（数据，不是散落的 `match`），链路见 `docs/roadmap.md` 的
 //! 「输入与模拟的分界」：
@@ -10,17 +12,19 @@
 //! ```text
 //!   W / S / A / D   前后左右      Space / Ctrl   上升 / 下降
 //!   Shift           加速          左键 / 右键     破坏 / 放置
-//!   Esc             退出
+//!   Tab             开关调试面板   Esc            退出（面板开着时先关面板）
 //! ```
 
 use lxlake::camera::{CameraInput, FlyCamera};
 use lxlake::core::command::{Command, Intent};
 use lxlake::core::event::Event;
-use lxlake::core::geometry::LogicalSize;
+use lxlake::core::geometry::{LogicalPosition, LogicalSize};
 use lxlake::core::input::{InputSource, IntentState, Key, Keymap, MouseButton};
+use lxlake::core::widget::{Anchor, UiId, Widget};
 use lxlake::core::window::WindowDesc;
 use lxlake::render::Renderer;
 use lxlake::runtime::{App, AppContext, Frame, JobPool};
+use lxlake::ui::{Quad, TextShaper, TextStyle, UiTree};
 use lxlake::world::block::{BlockDef, BlockId, BlockPalette, BlockRegistry, FaceTiles};
 use lxlake::world::chunk::ChunkPos;
 use lxlake::world::collision::sweep;
@@ -58,6 +62,38 @@ const REACH: f32 = 8.0;
 
 /// 图集每格的基色，下标与方块定义里的 tile 一致（0 号格保留给空气）。
 const ATLAS_TILES: [[u8; 3]; 4] = [[0, 0, 0], [130, 130, 132], [132, 96, 66], [94, 154, 70]];
+
+/// HUD 字体文件（OFL，随仓库提供，见 `data/fonts/`）。
+///
+/// 路径相对**工作区根目录**：`data/` 是发行物的资产目录（见 `docs/architecture.md` 的分层），
+/// 应用按约定从那里读，不是把 8MB 字体编进二进制。
+const HUD_FONT: &str = "data/fonts/NotoSansSC-Regular.otf";
+
+/// HUD 的字号与行高（逻辑像素）。
+const HUD_STYLE: TextStyle = TextStyle::new(14.0, 18.0);
+
+/// 面板到文字的内边距，以及面板到窗口左上角的距离（逻辑像素）。
+const HUD_PADDING: f64 = 8.0;
+const HUD_MARGIN: [f64; 2] = [12.0, 12.0];
+
+/// HUD 配色（sRGB + alpha）：半透明深色面板压住背景，文字近白。
+const HUD_PANEL_COLOR: [u8; 4] = [10, 12, 16, 170];
+const HUD_TEXT_COLOR: [u8; 4] = [235, 240, 245, 255];
+
+/// 准星的臂长（半长）与线宽（逻辑像素）。
+const CROSSHAIR_ARM: f64 = 5.0;
+const CROSSHAIR_THICKNESS: f64 = 2.0;
+const CROSSHAIR_COLOR: [u8; 4] = [255, 255, 255, 200];
+
+/// 帧率的平滑系数：HUD 上要连续变化，瞬时值（`1 / delta`）跳得没法看。
+const FPS_SMOOTHING: f32 = 0.05;
+
+/// HUD 里那四个 Widget 的身份。集中在这里，因为布局与出图都按它们记账。
+const HUD_PANEL_ID: UiId = UiId(1);
+const HUD_CROSSHAIR_H_ID: UiId = UiId(2);
+const HUD_CROSSHAIR_V_ID: UiId = UiId(3);
+/// 调试面板（Tab 开关）。**是模态的**：开着的时候键盘与视角都归它（见 `ui_owns_control`）。
+const HUD_HELP_ID: UiId = UiId(4);
 
 /// 应用声明的默认键位表：`输入源 → 意图`。
 ///
@@ -113,6 +149,16 @@ struct Demo {
   place_block: BlockId,
   /// 本帧累计的鼠标位移，`on_frame` 里消费掉。
   look: [f32; 2],
+  /// HUD：排版器（持有字体与字形缓存）。字体读不到时为 `None`，HUD 整块不画。
+  shaper: Option<TextShaper>,
+  /// HUD 的 Widget 树。每帧重建，命中测试（输入闸口）用的就是它。
+  tree: UiTree,
+  /// 光标在窗口里的位置（逻辑像素）。命中测试要它——带位置的只有 `CursorMoved` 那一类事件。
+  cursor: LogicalPosition,
+  /// 调试面板是否打开。面板是**模态**的：开着时键盘与视角都归它。
+  panel_open: bool,
+  /// 平滑后的帧率。
+  fps: f32,
   frames: u32,
   /// 上次汇总时的 `Frame::elapsed`。
   last_report: Duration,
@@ -165,6 +211,11 @@ impl Demo {
       commands: Vec::new(),
       place_block: palette.grass,
       look: [0.0, 0.0],
+      shaper: None,
+      tree: UiTree::new(),
+      cursor: LogicalPosition::new(0.0, 0.0),
+      panel_open: false,
+      fps: 0.0,
       frames: 0,
       last_report: Duration::ZERO,
     }
@@ -227,6 +278,119 @@ impl Demo {
       ));
     }
   }
+
+  /// 拼本帧的 HUD：左上角一块信息面板 + 屏幕中央的准星 +（面板开着时的）一块调试面板，
+  /// 产出**逻辑像素**的方片。
+  ///
+  /// 摆位走引擎那套锚定布局（[`UiTree`]）：先按视口算矩形，再往矩形里塞方片。不直接写死坐标是
+  /// 因为输入闸口要用同一棵树做命中测试——树里没有的东西，点上去也就不会有反应。
+  ///
+  /// **加入顺序有语义**：后加的在上层（见 [`UiTree::hit_test`]），所以准星排在最底。这个顺序
+  /// 就是准星不吞点击的凭据——帮助面板压在正中，面板开着时正中那一下落在面板上（见
+  /// `ui_owns_click`）。
+  ///
+  /// `scale_factor` 只参与字形光栅化：字按物理分辨率画得清楚，矩形仍旧是逻辑像素（见 `ui::text`）。
+  fn build_hud(&mut self, viewport: LogicalSize, scale_factor: f64) -> Vec<Quad> {
+    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+      return Vec::new();
+    }
+
+    // 面板的尺寸要先量出来（见下），所以文本得在借用排版器之前凑齐。
+    let uploaded = self
+      .renderer
+      .as_ref()
+      .map_or(0, |renderer| renderer.uploaded_chunks());
+    let info = hud_lines(
+      self.fps,
+      uploaded,
+      self.world.chunk_count(),
+      self.camera.position(),
+    );
+    let help = if self.panel_open {
+      help_lines()
+    } else {
+      Vec::new()
+    };
+
+    let Some(shaper) = self.shaper.as_mut() else {
+      // 字体没读进来：HUD 整块不画（启动时已经报过原因）。
+      return Vec::new();
+    };
+
+    self.tree.clear();
+    // 准星先加（在最底）：两根细方片而不是贴图——自绘 UI 的出图形式只有方片一种（见 `ui::draw`）。
+    self.tree.add(Widget::new(
+      HUD_CROSSHAIR_H_ID,
+      Anchor::Center,
+      LogicalSize::new(CROSSHAIR_ARM * 2.0, CROSSHAIR_THICKNESS),
+    ));
+    self.tree.add(Widget::new(
+      HUD_CROSSHAIR_V_ID,
+      Anchor::Center,
+      LogicalSize::new(CROSSHAIR_THICKNESS, CROSSHAIR_ARM * 2.0),
+    ));
+    self.tree.add(
+      Widget::new(
+        HUD_PANEL_ID,
+        Anchor::TopLeft,
+        panel_size(shaper, &info, scale_factor),
+      )
+      .offset(HUD_MARGIN),
+    );
+    if self.panel_open {
+      // 帮助面板摆正中：既在视觉上是「模态」，也顺手盖住准星。
+      self.tree.add(Widget::new(
+        HUD_HELP_ID,
+        Anchor::Center,
+        panel_size(shaper, &help, scale_factor),
+      ));
+    }
+    self.tree.layout(viewport);
+
+    let mut quads = Vec::new();
+    for id in [HUD_CROSSHAIR_H_ID, HUD_CROSSHAIR_V_ID] {
+      if let Some(rect) = self.tree.rect_of(id) {
+        quads.push(Quad::solid(rect, CROSSHAIR_COLOR));
+      }
+    }
+    push_panel_quads(
+      &mut quads,
+      &self.tree,
+      shaper,
+      HUD_PANEL_ID,
+      &info,
+      scale_factor,
+    );
+    if self.panel_open {
+      push_panel_quads(
+        &mut quads,
+        &self.tree,
+        shaper,
+        HUD_HELP_ID,
+        &help,
+        scale_factor,
+      );
+    }
+    quads
+  }
+
+  /// 开关调试面板。四件事一起翻，少翻一件都会出现「面板开着但相机还在转」这类怪相：
+  /// 面板状态、意图清空、光标抓取、光标可见性。
+  ///
+  /// 清意图是必须的：面板期间那些按键抬起事件被闸口挡在外面，不清就会留下「一直按着 W」的
+  /// 轴向，关面板后相机自己往前飞。
+  fn set_panel_open(&mut self, cx: &AppContext, open: bool) {
+    if self.panel_open == open {
+      return;
+    }
+    self.panel_open = open;
+    self.intents.clear();
+    if let Some(window) = cx.main_window() {
+      // 面板要鼠标（以后要能点控件），世界要锁定光标转视角：两者互斥。
+      window.set_cursor_grab(!open);
+      window.set_cursor_visible(open);
+    }
+  }
 }
 
 impl App for Demo {
@@ -240,6 +404,15 @@ impl App for Demo {
 
   fn on_startup(&mut self, cx: &mut AppContext) {
     self.pool = Some(JobPool::with_workers(Self::worker_count(), cx.wakeup()));
+
+    // HUD 的字体在这里读：8MB 的 CJK 字库不进二进制，走发行物的 `data/`（见 `HUD_FONT`）。
+    match std::fs::read(HUD_FONT) {
+      Ok(bytes) => match TextShaper::from_bytes(bytes) {
+        Ok(shaper) => self.shaper = Some(shaper),
+        Err(error) => eprintln!("lxlake demo：HUD 字体解析失败：{error}"),
+      },
+      Err(error) => eprintln!("lxlake demo：读不到 HUD 字体 {HUD_FONT}：{error}"),
+    }
 
     let Some(window) = cx.main_window().cloned() else {
       eprintln!("lxlake demo：没有窗口，只跑世界不渲染");
@@ -260,7 +433,23 @@ impl App for Demo {
     match event {
       Event::CloseRequested { .. } => cx.exit(),
       // 设备事件到这里就只剩「源 + 按下/抬起」：查表、记状态都在 `IntentState`，应用不再碰按键。
+      // 闸口在最前面：UI 抢走控制权时，事件根本走不到键位表。
       Event::KeyboardInput { key, pressed, .. } => {
+        if ui_owns_control(self.panel_open) {
+          if *pressed {
+            // 面板里只认这两个键。Esc 在这里是「关面板」，不是键位表上的「退出」——
+            // 退出那条键位仍在表里，面板关掉后照旧生效。
+            if matches!(key, Key::Tab | Key::Escape) {
+              self.set_panel_open(cx, false);
+            }
+          }
+          return;
+        }
+        // 面板关着：Tab 开面板（只认按下，按住 Tab 的自动重复不该反复开关）。
+        if *pressed && *key == Key::Tab {
+          self.set_panel_open(cx, true);
+          return;
+        }
         self
           .intents
           .handle(&self.keymap, InputSource::Key(*key), *pressed);
@@ -268,29 +457,47 @@ impl App for Demo {
       Event::MouseButton {
         button, pressed, ..
       } => {
+        // 点在面板上才归 UI；其余一律穿透到世界（准星就靠这条不吞点击，见 `ui_owns_click`）。
+        if ui_owns_click(self.panel_open, &self.tree, self.cursor) {
+          return;
+        }
         self
           .intents
           .handle(&self.keymap, InputSource::Mouse(*button), *pressed);
       }
-      // 设备级位移，与光标抓没抓住无关，直接攒起来。
+      // 设备级位移，与光标抓没抓住无关，直接攒起来；面板开着则不攒——那时用户是在瞄面板。
       Event::MouseMotion { delta } => {
+        if ui_owns_control(self.panel_open) {
+          return;
+        }
         self.look[0] += delta[0];
         self.look[1] += delta[1];
       }
+      // 位置只在命中测试里用，攒着供 `MouseButton` 那一下取。
+      Event::CursorMoved { position, .. } => self.cursor = *position,
       Event::Resized { size, .. } => {
         if let Some(renderer) = &mut self.renderer {
           renderer.resize(*size);
         }
       }
+      // 换显示器 / 改系统缩放：自绘 UI 的方片是逻辑像素，渲染侧得知道新的换算比例。
+      Event::ScaleFactorChanged {
+        scale_factor, size, ..
+      } => {
+        if let Some(renderer) = &mut self.renderer {
+          renderer.set_scale_factor(*scale_factor);
+          renderer.resize(*size);
+        }
+      }
       // 失焦就放开光标，不然切出去还锁着鼠标没法操作别的窗口；同时丢掉按住的意图，
-      // 切回来不该还在往前飞。
+      // 切回来不该还在往前飞。面板开着时本来就该是自由光标，两个条件一起看。
       Event::Focused { focused, .. } => {
         if !*focused {
           self.intents.clear();
         }
         if let Some(window) = cx.main_window() {
-          window.set_cursor_grab(*focused);
-          window.set_cursor_visible(!*focused);
+          window.set_cursor_grab(*focused && !self.panel_open);
+          window.set_cursor_visible(!*focused || self.panel_open);
         }
       }
       _ => {}
@@ -299,6 +506,16 @@ impl App for Demo {
 
   fn on_frame(&mut self, cx: &mut AppContext, frame: Frame) {
     self.frames += 1;
+    // 帧率的平滑值（标题栏那份仍是每秒的窗口平均，见 `report`）。
+    let delta = frame.delta.as_secs_f32();
+    if delta > 0.0 {
+      let instant = 1.0 / delta;
+      self.fps = if self.frames > 1 {
+        self.fps * (1.0 - FPS_SMOOTHING) + instant * FPS_SMOOTHING
+      } else {
+        instant
+      };
+    }
 
     if let Some(pool) = &self.pool {
       let delta = frame.delta.as_secs_f32().min(MAX_DELTA);
@@ -354,6 +571,21 @@ impl App for Demo {
       let output = &mut self.output;
       streamer.update(world, pool, focus, output);
 
+      // HUD 在流式之后、渲染之前拼：面板上的数字要是这一帧的。
+      let (viewport, scale_factor) =
+        cx.main_window()
+          .map_or((LogicalSize::new(0.0, 0.0), 1.0), |window| {
+            let scale_factor = window.scale_factor();
+            (window.size().to_logical(scale_factor), scale_factor)
+          });
+      let quads = self.build_hud(viewport, scale_factor);
+      // 本帧新光栅化的字形交给渲染侧增量补进 UI 图集；交出即清空（见 `ui::text`）。
+      let glyphs = self
+        .shaper
+        .as_mut()
+        .map(TextShaper::take_new_glyphs)
+        .unwrap_or_default();
+
       if let Some(renderer) = &mut self.renderer {
         for mesh in &self.output.meshed {
           renderer.upload(mesh);
@@ -361,7 +593,8 @@ impl App for Demo {
         for pos in &self.output.unloaded {
           renderer.unload(*pos);
         }
-        if let Err(error) = renderer.render(&self.camera) {
+        renderer.upload_glyphs(&glyphs);
+        if let Err(error) = renderer.render(&self.camera, &quads) {
           eprintln!("lxlake demo：渲染失败：{error}");
           cx.exit();
         }
@@ -387,7 +620,205 @@ fn chunk_focus(position: [f32; 3]) -> ChunkPos {
   ])
 }
 
+/// HUD 的文本行：帧率、GPU 上的区块、世界里的区块、相机坐标。
+///
+/// 拼文本是应用的事，引擎只负责排版——所以这几行不放进引擎，也不做成可配置的「HUD 描述符」。
+fn hud_lines(fps: f32, uploaded: usize, chunks: usize, position: [f32; 3]) -> Vec<String> {
+  vec![
+    format!("{fps:.0} fps"),
+    format!("GPU 区块 {uploaded}"),
+    format!("世界区块 {chunks}"),
+    format!(
+      "相机 {:.1}, {:.1}, {:.1}",
+      position[0], position[1], position[2]
+    ),
+  ]
+}
+
+/// 调试面板的文本：默认键位表的人话版。
+///
+/// 面板是**模态**的（见 [`ui_owns_control`]），所以这张表里必须有「怎么关掉它」——否则用户会
+/// 以为程序卡住了。Esc 在这儿仍旧写「退出」：面板开着时那一下先关面板，退出要再按一次。
+fn help_lines() -> Vec<String> {
+  vec![
+    "WASD 移动 / Space 上升 / Ctrl 下降".to_owned(),
+    "Shift 加速 / 左键破坏 / 右键放置".to_owned(),
+    "Tab 开关面板 / Esc 退出 / 鼠标转向".to_owned(),
+  ]
+}
+
+/// UI 是否该独占**连续控制**（键盘轴值与视角转向）。
+///
+/// 判据只有「面板开着吗」这一条：面板是模态的，读面板时按 WASD 不该把相机开走、动鼠标不该把
+/// 画面转走。不做逐键、逐区域的判断——键盘没有「位置」，那样只会得到一份没人能预测的规则。
+fn ui_owns_control(panel_open: bool) -> bool {
+  panel_open
+}
+
+/// UI 是否该独占这一次**指针点击**。
+///
+/// 两个前提缺一不可：
+/// - 面板开着——面板没开时光标是锁住的，根本不存在「指针在哪」这回事，命中测试无从谈起；
+/// - 指针确实落在某个 Widget 上。
+///
+/// 于是**准星不会吞点击**：它是屏幕正中一个 10×10 的 Widget，但帮助面板开着时也压在正中且
+/// 后加（在上层，见 [`Demo::build_hud`] 的加入顺序），命中测试落在面板上；面板没开时第一个
+/// 前提就不成立。所以「对着中心挖方块」的那一下永远到得了世界。
+fn ui_owns_click(panel_open: bool, tree: &UiTree, cursor: LogicalPosition) -> bool {
+  panel_open && tree.hit_test(cursor).is_some()
+}
+
+/// 量一块面板的尺寸：宽度取最宽的一行，高度取行数，四周各留一个 `HUD_PADDING`。
+///
+/// 先量后摆：文字与底色共用同一个矩形，不会出现「文字溢出面板」。
+fn panel_size(shaper: &TextShaper, lines: &[String], scale_factor: f64) -> LogicalSize {
+  let mut width = 0.0f64;
+  for line in lines {
+    width = width.max(shaper.measure(line, HUD_STYLE, scale_factor).width);
+  }
+  LogicalSize::new(
+    width + HUD_PADDING * 2.0,
+    lines.len() as f64 * f64::from(HUD_STYLE.line_height) + HUD_PADDING * 2.0,
+  )
+}
+
+/// 把一块**已摆好**的面板出成方片：先底色，再逐行文字。
+///
+/// 摆位与出图分两步是因为底色要拿矩形——矩形得等 [`UiTree::layout`] 算过才有，所以这里只做
+/// 后半截。行距用 `HUD_STYLE.line_height`，与 [`panel_size`] 量高度时是同一个数。
+fn push_panel_quads(
+  quads: &mut Vec<Quad>,
+  tree: &UiTree,
+  shaper: &mut TextShaper,
+  id: UiId,
+  lines: &[String],
+  scale_factor: f64,
+) {
+  let Some(panel) = tree.rect_of(id) else {
+    return;
+  };
+  quads.push(Quad::solid(panel, HUD_PANEL_COLOR));
+
+  let mut baseline = panel.y + HUD_PADDING;
+  for line in lines {
+    quads.extend(shaper.layout(
+      line,
+      HUD_STYLE,
+      LogicalPosition::new(panel.x + HUD_PADDING, baseline),
+      HUD_TEXT_COLOR,
+      scale_factor,
+    ));
+    baseline += f64::from(HUD_STYLE.line_height);
+  }
+}
+
 #[lxlake::entry]
 fn main() -> Demo {
   Demo::new()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// 字体资源的**绝对**路径。
+  ///
+  /// `HUD_FONT` 是相对工作区根的路径（发行物按工作目录读资产），而 `cargo test` 的工作目录是
+  /// **包根**，所以测试里不能被它复用：`concat!(env!("CARGO_MANIFEST_DIR"), ...)` 在编译期拼出
+  /// 绝对路径，与工作目录无关。
+  const FONT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../data/fonts/NotoSansSC-Regular.otf"
+  );
+
+  /// 建一个装了字体的 Demo（字体是 HUD 的前提，没有就没有可测的布局）。
+  fn demo_with_font() -> Option<Demo> {
+    let bytes = std::fs::read(FONT_PATH).ok()?;
+    let shaper = TextShaper::from_bytes(bytes).ok()?;
+    let mut demo = Demo::new();
+    demo.shaper = Some(shaper);
+    Some(demo)
+  }
+
+  #[test]
+  fn a_click_lands_on_the_ui_only_when_the_pointer_is_over_the_open_panel() {
+    let mut tree = UiTree::new();
+    tree.add(Widget::new(
+      UiId(1),
+      Anchor::TopLeft,
+      LogicalSize::new(200.0, 100.0),
+    ));
+    tree.layout(LogicalSize::new(1000.0, 600.0));
+
+    // 面板关着：点在哪都不归 UI——光标此刻锁着，没有「指针在哪」这回事。
+    assert!(!ui_owns_click(
+      false,
+      &tree,
+      LogicalPosition::new(10.0, 10.0)
+    ));
+    // 面板开着、点在面板上：归 UI。
+    assert!(ui_owns_click(true, &tree, LogicalPosition::new(10.0, 10.0)));
+    // 面板开着、点在外面：穿透到世界。
+    assert!(!ui_owns_click(
+      true,
+      &tree,
+      LogicalPosition::new(500.0, 300.0)
+    ));
+  }
+
+  #[test]
+  fn the_open_panel_takes_the_keyboard_and_the_view() {
+    assert!(!ui_owns_control(false), "面板关着时键盘与视角都归世界");
+    assert!(ui_owns_control(true), "面板是模态的");
+  }
+
+  #[test]
+  fn the_panel_is_sized_around_its_widest_line() {
+    let Some(shaper) = demo_with_font().and_then(|demo| demo.shaper) else {
+      return; // 没有字体资产就不测：HUD 本身也画不出来。
+    };
+
+    let lines = vec!["iiii".to_owned(), "WWWWWWWW".to_owned()];
+    let size = panel_size(&shaper, &lines, 1.0);
+    let widest = shaper.measure(&lines[1], HUD_STYLE, 1.0).width;
+
+    assert!(widest > shaper.measure(&lines[0], HUD_STYLE, 1.0).width);
+    assert!(
+      (size.width - (widest + HUD_PADDING * 2.0)).abs() < 1e-9,
+      "宽取最宽一行 + 两侧内边距，实际 {}",
+      size.width
+    );
+    assert!(
+      (size.height - (2.0 * f64::from(HUD_STYLE.line_height) + HUD_PADDING * 2.0)).abs() < 1e-9,
+      "高取行数 × 行高 + 上下内边距，实际 {}",
+      size.height
+    );
+  }
+
+  /// 闸口真正的凭据：面板开着时正中那一下落在**面板**上，不是准星上。
+  #[test]
+  fn the_open_panel_covers_the_crosshair_at_the_center() {
+    let Some(mut demo) = demo_with_font() else {
+      return;
+    };
+    let viewport = LogicalSize::new(1000.0, 600.0);
+    let center = LogicalPosition::new(500.0, 300.0);
+
+    demo.build_hud(viewport, 1.0);
+    assert!(!ui_owns_click(demo.panel_open, &demo.tree, center));
+    assert_eq!(
+      demo.tree.hit_test(center),
+      Some(HUD_CROSSHAIR_V_ID),
+      "面板关着时正中归准星（竖臂后加，压在横臂上；但光标锁着，这一下仍不归 UI）"
+    );
+
+    demo.panel_open = true;
+    demo.build_hud(viewport, 1.0);
+    assert_eq!(
+      demo.tree.hit_test(center),
+      Some(HUD_HELP_ID),
+      "帮助面板后加、压在正中，所以正中那一下是它的"
+    );
+    assert!(ui_owns_click(demo.panel_open, &demo.tree, center));
+  }
 }

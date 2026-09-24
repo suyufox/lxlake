@@ -6,12 +6,15 @@
 //! ## 一帧的形状
 //!
 //! ```text
-//!   write_buffer(全局 uniform) → 阴影 pass（只写深度）→ 主 pass（颜色 + 深度）→ present
+//!   write_buffer(全局 uniform) → 阴影 pass（只写深度）→ 主 pass（颜色 + 深度）
+//!   → ui pass（颜色 Load、无深度）→ present
 //! ```
 //!
 //! 绘制循环里**不切任何绑定**：顶点已经烘焙成世界坐标，因此「区块在哪」不体现在 uniform 上，
 //! 一份全局数据就能画完全部区块；区块之间只有顶点 / 索引缓冲的区别。（主 pass 的两组绑定在
 //! 进循环前各设一次，循环里不再动。）
+//!
+//! 最后一趟是自绘 UI（见 [`ui`]）：**只共用这个 encoder**，图集、管线、顶点布局都是它自己的。
 //!
 //! ## 与世界的分界
 //!
@@ -21,14 +24,16 @@
 
 mod atlas;
 mod pipeline;
+mod ui;
 
 pub use atlas::Atlas;
 pub use pipeline::{Globals, Pipelines};
 
 use crate::camera::FlyCamera;
-use crate::core::geometry::PhysicalSize;
+use crate::core::geometry::{PhysicalSize, sanitize_scale};
 use crate::core::window::WindowHandle;
 use crate::meshing::{ChunkMesh, Vertex};
+use crate::ui::{GlyphBitmap, Quad};
 use crate::world::chunk::ChunkPos;
 use glam::Vec3;
 use glam::camera::rh::{proj, view};
@@ -125,6 +130,10 @@ pub struct Renderer {
   depth_view: wgpu::TextureView,
   shadow_view: wgpu::TextureView,
   chunks: HashMap<ChunkPos, ChunkDraw>,
+  /// 自绘 UI：自带图集与管线，只借用同一个 encoder（见 [`ui`]）。
+  ui: ui::UiRenderer,
+  /// DPI 缩放因子（来自窗口）。UI 的方片是逻辑像素，要靠它换算成逻辑视口。
+  scale_factor: f64,
 }
 
 /// 用哪些图形后端建实例。
@@ -234,6 +243,8 @@ impl Renderer {
       ],
     });
 
+    let ui = ui::UiRenderer::new(&device, &queue, config.format);
+
     Ok(Self {
       device,
       queue,
@@ -247,6 +258,9 @@ impl Renderer {
       depth_view,
       shadow_view,
       chunks: HashMap::new(),
+      ui,
+      // 窗口就在手边，起始的 DPI 不用等一个事件（后续变化见 `set_scale_factor`）。
+      scale_factor: sanitize_scale(window.scale_factor()),
     })
   }
 
@@ -264,6 +278,16 @@ impl Renderer {
     self.config.height = size.height;
     self.surface.configure(&self.device, &self.config);
     self.depth_view = create_depth_view(&self.device, size.width, size.height, "main.depth");
+  }
+
+  /// DPI 缩放因子变了（跨显示器拖动、系统缩放调整）。只影响自绘 UI 的换算，表面不用重配。
+  pub fn set_scale_factor(&mut self, scale_factor: f64) {
+    self.scale_factor = sanitize_scale(scale_factor);
+  }
+
+  /// 交来本帧新光栅化的字形，增量补进 UI 图集（见 [`crate::ui::TextShaper::take_new_glyphs`]）。
+  pub fn upload_glyphs(&mut self, glyphs: &[GlyphBitmap]) {
+    self.ui.upload_glyphs(&self.queue, glyphs);
   }
 
   /// 上传（或覆盖）一个区块的几何体。
@@ -305,8 +329,9 @@ impl Renderer {
     self.chunks.len()
   }
 
-  /// 画一帧。`camera` 提供观察投影与眼睛位置。
-  pub fn render(&mut self, camera: &FlyCamera) -> Result<(), RenderError> {
+  /// 画一帧。`camera` 提供观察投影与眼睛位置，`ui` 是要盖在画面上的自绘方片（逻辑像素；
+  /// 没有 HUD 时给空切片，那个 pass 连带整个 UI 渲染都不发生）。
+  pub fn render(&mut self, camera: &FlyCamera, ui: &[Quad]) -> Result<(), RenderError> {
     let eye = camera.position();
     let globals = Globals {
       view_proj: camera.view_projection(self.aspect()),
@@ -407,6 +432,17 @@ impl Renderer {
       pass.set_bind_group(1, &self.textures_bind_group, &[]);
       draw_chunks(&mut pass, &self.chunks);
     }
+
+    // UI 接在同一个 encoder 的最后：它要盖在**已经画好的**画面上（`LoadOp::Load`），另起一次
+    // 提交只会多一次开销。
+    self.ui.draw(
+      &self.device,
+      &self.queue,
+      &mut encoder,
+      &view,
+      ui,
+      PhysicalSize::new(self.config.width, self.config.height).to_logical(self.scale_factor),
+    );
 
     self.queue.submit(Some(encoder.finish()));
     self.queue.present(frame);

@@ -32,6 +32,10 @@ bytemuck = { version = "1", features = ["derive"], optional = true }
 glam = "0.33.9"
 crossbeam-deque = "0.8.8"
 
+# 文本（M3 起）：UI 排版与字形光栅化。ab_glyph 是纯 Rust 的轻量字体库，属 glam 同级的普通依赖
+# ——不加 feature 门，因为框架主线（不开 render）同样要自绘 UI 文本，而它不碰任何 GPU 类型。
+ab_glyph = "0.2"
+
 [features]
 default = []
 render = ["dep:wgpu", "dep:naga", "dep:bytemuck"]

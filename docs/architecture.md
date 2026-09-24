@@ -121,7 +121,7 @@ plugin      = ["dep:wasmtime", "dep:wit-bindgen"]
 
 ```text
 lxlake-demo.exe        主 bin
-data/                  引擎资产：locale/ models/ textures/ shaders/
+data/                  引擎资产：locale/ models/ textures/ shaders/ fonts/
 native/                经 vcpkg 引入的 C 依赖动态库，各自成目录
   cef/                 libcef.dll + resources/ + locales/（CEF 自带目录结构）
   ffmpeg/              av*.dll（仅 cef-ffmpeg 发行物）
@@ -139,9 +139,9 @@ plugins/               插件位：经那条窄 C ABI 加载
 根本不会产生可随附的 dll。CEF 没有静态选项，必须走这条路；ffmpeg 可静可动，留到打包时再定。GPL 隔离
 照旧：`cef-ffmpeg` 是单独发行物，默认发行物的 `native/ffmpeg/` 不存在。
 
-`data/` 与 `plugins/` 的落地依赖**资产管线**（本地化、模型、纹理的外部文件），目前一条都没有：M1 的
-图集是程序化生成的、几何是噪声密度场算出来的，全项目没有一个外部资产文件。见[路线图](roadmap.md)的
-资产管线一节。
+`data/` 与 `plugins/` 的落地依赖**资产管线**（本地化、模型、纹理的外部文件），目前只有 `fonts/` 落了
+地——M3 的 HUD 字体（OFL，随仓库提供），是应用按约定从 `data/` 读的第一个外部资产。其余仍是程序化
+生成：M1 的图集、几何全由噪声密度场算出来。见[路线图](roadmap.md)的资产管线一节。
 
 ## 任务与异步
 

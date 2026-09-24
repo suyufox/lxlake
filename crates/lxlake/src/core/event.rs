@@ -1,6 +1,6 @@
 //! 运行时事件。平台负责把原生事件映射到这里（映射逻辑在 `platform`，契约层只定义形状）。
 
-use crate::core::geometry::PhysicalSize;
+use crate::core::geometry::{LogicalPosition, PhysicalSize};
 use crate::core::input::{Key, MouseButton};
 use crate::core::window::WindowId;
 
@@ -41,6 +41,15 @@ pub enum Event {
   /// 给的是**位移量**而不是光标位置——光标位置受屏幕边界与系统加速影响，视角控制要的
   /// 正是位移量，这也是 winit 自己提醒的那一点。
   MouseMotion { delta: [f32; 2] },
+
+  /// 光标在窗口内的位置（逻辑像素，左上角为原点）。
+  ///
+  /// 与 [`Event::MouseMotion`] 分工明确：设备级位移喂视角控制，这里的**位置**喂 UI 命中测试。
+  /// 逻辑像素意味着 UI 布局不必逐处乘 DPI——换显示器时同一个 Widget 的摆位规则不变。
+  CursorMoved {
+    window: WindowId,
+    position: LogicalPosition,
+  },
 
   /// 鼠标按键按下 / 抬起。
   MouseButton {

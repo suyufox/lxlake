@@ -30,6 +30,8 @@ pub enum Key {
   Shift,
   /// 左右 Ctrl 合为一个。
   Control,
+  /// Tab：M3 起用于开关调试面板（自绘 UI 的第一个「抢输入」场景）。
+  Tab,
   Escape,
 }
 

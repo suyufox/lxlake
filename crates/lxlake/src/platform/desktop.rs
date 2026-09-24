@@ -5,7 +5,7 @@
 
 use crate::core::Error;
 use crate::core::event::Event;
-use crate::core::geometry::PhysicalSize;
+use crate::core::geometry::{PhysicalPosition, PhysicalSize};
 use crate::core::input::{Key, MouseButton};
 use crate::core::window::{WindowHandle, WindowId};
 use crate::runtime::{App, AppContext, FrameClock, Wakeup};
@@ -255,6 +255,17 @@ impl<A: App> ApplicationHandler<UserEvent> for Driver<A> {
           });
         }
       }
+      // 光标位置换算成逻辑坐标再派发：UI 的布局与命中测试全在逻辑像素里，应用不必自己乘 DPI。
+      WinitWindowEvent::CursorMoved { position, .. } => {
+        let scale_factor = self
+          .cx
+          .window(id)
+          .map_or(1.0, |window| window.scale_factor());
+        self.emit(Event::CursorMoved {
+          window: id,
+          position: PhysicalPosition::new(position.x, position.y).to_logical(scale_factor),
+        });
+      }
       WinitWindowEvent::MouseInput { state, button, .. } => {
         if let Some(button) = translate_button(button) {
           self.emit(Event::MouseButton {
@@ -352,6 +363,7 @@ fn translate_key(physical: PhysicalKey) -> Option<Key> {
     KeyCode::Space => Key::Space,
     KeyCode::ShiftLeft | KeyCode::ShiftRight => Key::Shift,
     KeyCode::ControlLeft | KeyCode::ControlRight => Key::Control,
+    KeyCode::Tab => Key::Tab,
     KeyCode::Escape => Key::Escape,
     _ => return None,
   })

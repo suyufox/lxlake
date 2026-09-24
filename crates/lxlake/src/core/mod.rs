@@ -1,4 +1,4 @@
-//! 契约层：事件、几何、窗口等**跨层共享的数据与 trait**。
+//! 契约层：事件、几何、窗口、Widget 等**跨层共享的数据与 trait**。
 //!
 //! **硬约束：本层不出现 winit / wgpu 类型**，也不依赖任何平台实现。这条是可机检的——
 //! 契约层一旦出现这些类型，框架主线就再也无法在不启用渲染的情况下干净编译
@@ -8,6 +8,7 @@ pub mod command;
 pub mod event;
 pub mod geometry;
 pub mod input;
+pub mod widget;
 pub mod window;
 
 use std::fmt;
