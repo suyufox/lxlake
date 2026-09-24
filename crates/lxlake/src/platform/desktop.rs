@@ -122,30 +122,41 @@ impl<A: Application> Driver<A> {
   }
 
   fn create_windows(&mut self, event_loop: &ActiveEventLoop) {
-    for desc in self.app.windows() {
+    for spec in self.app.windows() {
       let attributes = Window::default_attributes()
-        .with_title(&desc.title)
-        .with_inner_size(WinitLogicalSize::new(desc.size.width, desc.size.height))
-        .with_resizable(desc.resizable)
-        .with_visible(desc.visible);
+        .with_title(&spec.desc.title)
+        .with_inner_size(WinitLogicalSize::new(
+          spec.desc.size.width,
+          spec.desc.size.height,
+        ))
+        .with_resizable(spec.desc.resizable)
+        .with_visible(spec.desc.visible);
 
       let window = match event_loop.create_window(attributes) {
         Ok(window) => window,
         Err(err) => {
-          eprintln!("lxlake: 建窗失败（{}）：{err}", desc.title);
+          eprintln!("lxlake: 建窗失败（{}）：{err}", spec.label);
           continue;
         }
       };
 
+      // id 在本层发号——它和上面那张翻译表是同一份「窗口出现次序」的两个视图，分开发号就会错位。
       let id = WindowId(self.next_window_id);
       self.next_window_id += 1;
       self.window_ids.push((window.id(), id));
       self
         .app
         .context_mut()
-        .push_window(Arc::new(DesktopWindow { id, window }));
+        .insert_window(id, &spec.label, Arc::new(DesktopWindow { id, window }));
       self.app.on_window_ready(id);
     }
+  }
+
+  /// 摘掉一个窗口：翻译表、注册表、应用回调三处同步，少一处就留下鬼影。
+  fn destroy_window(&mut self, id: WindowId) {
+    self.window_ids.retain(|(_, contract)| *contract != id);
+    self.app.context_mut().remove_window(id);
+    self.app.on_window_destroyed(id);
   }
 
   /// 出一帧：推进时钟并交给应用。
@@ -236,8 +247,8 @@ impl<A: Application> ApplicationHandler<UserEvent> for Driver<A> {
         let size = self
           .app
           .context_mut()
-          .window(id)
-          .map_or_else(PhysicalSize::default, |w| w.size());
+          .window_by_id(id)
+          .map_or_else(PhysicalSize::default, |w| w.handle().size());
         self.emit(Event::ScaleFactorChanged {
           window: id,
           scale_factor,
@@ -264,8 +275,8 @@ impl<A: Application> ApplicationHandler<UserEvent> for Driver<A> {
         let scale_factor = self
           .app
           .context_mut()
-          .window(id)
-          .map_or(1.0, |window| window.scale_factor());
+          .window_by_id(id)
+          .map_or(1.0, |window| window.handle().scale_factor());
         self.emit(Event::CursorMoved {
           window: id,
           position: PhysicalPosition::new(position.x, position.y).to_logical(scale_factor),
@@ -288,8 +299,13 @@ impl<A: Application> ApplicationHandler<UserEvent> for Driver<A> {
         self.emit(Event::MouseWheel { window: id, delta });
       }
       WinitWindowEvent::CloseRequested => {
+        self.destroy_window(id);
         self.emit(Event::CloseRequested { window: id });
-        event_loop.exit();
+        // 多窗口下不能「关一个就走」：注册表空了才轮到事件循环退。
+        // 想提前退（比如关掉主窗口就结束）由应用在事件钩子里调 `App::exit()`。
+        if self.app.context_mut().window_count() == 0 {
+          event_loop.exit();
+        }
       }
       _ => {}
     }

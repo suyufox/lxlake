@@ -271,7 +271,7 @@ impl Demo {
     self.last_report = frame.elapsed;
 
     if let Some(window) = cx.main_window() {
-      window.set_title(&format!(
+      window.handle().set_title(&format!(
         "lxlake demo — {fps:.1} fps | GPU 区块 {uploaded} | 世界 {} | 流式 {}",
         self.world.chunk_count(),
         self.streamer.tracked()
@@ -387,8 +387,8 @@ impl Demo {
     self.intents.clear();
     if let Some(window) = cx.main_window() {
       // 面板要鼠标（以后要能点控件），世界要锁定光标转视角：两者互斥。
-      window.set_cursor_grab(!open);
-      window.set_cursor_visible(open);
+      window.handle().set_cursor_grab(!open);
+      window.handle().set_cursor_visible(open);
     }
   }
 }
@@ -406,19 +406,19 @@ impl Demo {
       Err(error) => eprintln!("lxlake demo：读不到 HUD 字体 {HUD_FONT}：{error}"),
     }
 
-    let Some(window) = cx.main_window().cloned() else {
+    let Some(handle) = cx.main_window().map(|window| Arc::clone(window.handle())) else {
       eprintln!("lxlake demo：没有窗口，只跑世界不渲染");
       return;
     };
 
-    match Renderer::new(Arc::clone(&window), &ATLAS_TILES) {
+    match Renderer::new(Arc::clone(&handle), &ATLAS_TILES) {
       Ok(renderer) => self.renderer = Some(renderer),
       Err(error) => eprintln!("lxlake demo：渲染初始化失败：{error}"),
     }
 
     // 抓住光标，鼠标位移才能一直喂给视角控制。
-    window.set_cursor_grab(true);
-    window.set_cursor_visible(false);
+    handle.set_cursor_grab(true);
+    handle.set_cursor_visible(false);
   }
 
   fn handle_event(&mut self, cx: &mut AppContext, event: &Event) {
@@ -488,8 +488,12 @@ impl Demo {
           self.intents.clear();
         }
         if let Some(window) = cx.main_window() {
-          window.set_cursor_grab(*focused && !self.panel_open);
-          window.set_cursor_visible(!*focused || self.panel_open);
+          window
+            .handle()
+            .set_cursor_grab(*focused && !self.panel_open);
+          window
+            .handle()
+            .set_cursor_visible(!*focused || self.panel_open);
         }
       }
       _ => {}
@@ -567,8 +571,11 @@ impl Demo {
       let (viewport, scale_factor) =
         cx.main_window()
           .map_or((LogicalSize::new(0.0, 0.0), 1.0), |window| {
-            let scale_factor = window.scale_factor();
-            (window.size().to_logical(scale_factor), scale_factor)
+            let scale_factor = window.handle().scale_factor();
+            (
+              window.handle().size().to_logical(scale_factor),
+              scale_factor,
+            )
           });
       let quads = self.build_hud(viewport, scale_factor);
       // 本帧新光栅化的字形交给渲染侧增量补进 UI 图集；交出即清空（见 `ui::text`）。
@@ -728,7 +735,7 @@ fn push_panel_quads(
 #[lxlake::entry]
 fn main() -> lxlake::Builder {
   lxlake::Builder::new()
-    .window(WindowDesc {
+    .main_window(WindowDesc {
       title: "lxlake demo".to_owned(),
       size: LogicalSize::new(1280.0, 720.0),
       ..WindowDesc::default()

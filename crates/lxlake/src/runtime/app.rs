@@ -7,7 +7,8 @@
 //! 平台侧不认识 [`App`]，它只认 [`Application`](super::Application)。
 
 use super::pump::{EventSource, PumpContext, Wakeup};
-use crate::core::window::{WindowHandle, WindowId};
+use super::window::{Window, WindowRegistry};
+use crate::core::window::{WindowHandle, WindowId, WindowLabel};
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,9 +25,10 @@ static NOOP_WAKEUP: NoopWakeup = NoopWakeup;
 
 /// 帧 / 事件上下文：应用与运行时、平台之间的调用面。
 ///
-/// 窗口只以 [`WindowHandle`] 的形式露出——契约层与运行时都不认识 winit 的 `Window`。
+/// 窗口只以 [`Window`]（内部持 [`WindowHandle`]）的形式露出——契约层与运行时都不认识 winit
+/// 的 `Window`。
 pub struct AppContext {
-  windows: Vec<Arc<dyn WindowHandle>>,
+  windows: WindowRegistry,
   sources: Vec<Box<dyn EventSource>>,
   /// 跨线程唤醒句柄。**要等事件循环建好才有**，故由平台在建循环之后注入
   /// （见 [`Application::attach_wakeup`](super::Application::attach_wakeup)）。
@@ -37,7 +39,7 @@ pub struct AppContext {
 impl AppContext {
   pub(crate) fn new() -> Self {
     Self {
-      windows: Vec::new(),
+      windows: WindowRegistry::new(),
       sources: Vec::new(),
       wakeup: None,
       exit_requested: false,
@@ -49,19 +51,29 @@ impl AppContext {
     self.wakeup = Some(wakeup);
   }
 
-  /// 全部窗口。
-  pub fn windows(&self) -> &[Arc<dyn WindowHandle>] {
-    &self.windows
+  /// 主窗口。
+  pub fn main_window(&self) -> Option<&Window> {
+    self.windows.main()
   }
 
-  /// 主窗口（第一个创建的窗口）。
-  pub fn main_window(&self) -> Option<&Arc<dyn WindowHandle>> {
-    self.windows.first()
+  /// 按标签取窗。
+  pub fn window(&self, label: &str) -> Option<&Window> {
+    self.windows.by_label(label)
   }
 
-  /// 按 id 取窗口。
-  pub fn window(&self, id: WindowId) -> Option<&Arc<dyn WindowHandle>> {
-    self.windows.iter().find(|window| window.id() == id)
+  /// 按 id 取窗。事件里带的是 id，运行时与平台走这一条。
+  pub fn window_by_id(&self, id: WindowId) -> Option<&Window> {
+    self.windows.by_id(id)
+  }
+
+  /// 全部窗口，按建窗顺序。
+  pub fn windows(&self) -> impl Iterator<Item = &Window> {
+    self.windows.iter()
+  }
+
+  /// 窗口数量。
+  pub fn window_count(&self) -> usize {
+    self.windows.len()
   }
 
   /// 跨线程唤醒句柄：别的线程拿它请求运行时立刻醒一次。
@@ -90,8 +102,19 @@ impl AppContext {
     self.exit_requested
   }
 
-  pub(crate) fn push_window(&mut self, window: Arc<dyn WindowHandle>) {
-    self.windows.push(window);
+  /// 登记一个窗口（id 由运行时分配）。
+  pub(crate) fn insert_window(
+    &mut self,
+    id: WindowId,
+    label: &WindowLabel,
+    handle: Arc<dyn WindowHandle>,
+  ) {
+    self.windows.insert(id, label, handle);
+  }
+
+  /// 摘掉一个窗口。
+  pub(crate) fn remove_window(&mut self, id: WindowId) -> Option<Window> {
+    self.windows.remove(id)
   }
 
   pub(crate) fn clear_windows(&mut self) {
@@ -158,19 +181,24 @@ impl App {
     self.cx.set_wakeup(wakeup);
   }
 
-  /// 主窗口（第一个创建的窗口）。
-  pub fn main_window(&self) -> Option<&Arc<dyn WindowHandle>> {
+  /// 主窗口。
+  pub fn main_window(&self) -> Option<&Window> {
     self.cx.main_window()
   }
 
-  /// 按 id 取窗口。
-  pub fn window(&self, id: WindowId) -> Option<&Arc<dyn WindowHandle>> {
-    self.cx.window(id)
+  /// 按标签取窗。
+  pub fn window(&self, label: &str) -> Option<&Window> {
+    self.cx.window(label)
   }
 
-  /// 全部窗口。
-  pub fn windows(&self) -> &[Arc<dyn WindowHandle>] {
+  /// 全部窗口，按建窗顺序。
+  pub fn windows(&self) -> impl Iterator<Item = &Window> {
     self.cx.windows()
+  }
+
+  /// 窗口数量。
+  pub fn window_count(&self) -> usize {
+    self.cx.window_count()
   }
 
   /// 请求退出事件循环。

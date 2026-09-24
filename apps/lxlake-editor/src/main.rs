@@ -14,7 +14,7 @@ struct Editor;
 #[lxlake::entry]
 fn main() -> lxlake::Builder {
   lxlake::Builder::new()
-    .window(WindowDesc {
+    .main_window(WindowDesc {
       title: "lxlake editor".to_owned(),
       ..WindowDesc::default()
     })

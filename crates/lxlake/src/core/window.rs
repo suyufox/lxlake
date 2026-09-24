@@ -2,10 +2,73 @@
 
 use crate::core::geometry::{LogicalSize, PhysicalSize};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::fmt;
 
 /// 窗口身份。契约层自有类型，与平台的窗口 id 解耦。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WindowId(pub u64);
+
+/// 窗口标识符：多窗口下**按名字**取窗的那把钥匙。
+///
+/// id 是运行时发的号（顺序、会复用），标签是应用写的名字（稳定、可读）——两者都在窗口上，
+/// 但应用侧一律用标签，id 只在运行时内部与事件里流转。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WindowLabel(pub String);
+
+impl WindowLabel {
+  /// 主窗口的**保留**标签：应用的第一个窗口就是它，`create_window` 不能再用它。
+  pub const MAIN: &'static str = "main";
+
+  pub fn new(label: impl Into<String>) -> Self {
+    Self(label.into())
+  }
+
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+
+  /// 是否是主窗口。
+  pub fn is_main(&self) -> bool {
+    self.0 == Self::MAIN
+  }
+}
+
+impl fmt::Display for WindowLabel {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(&self.0)
+  }
+}
+
+impl From<&str> for WindowLabel {
+  fn from(label: &str) -> Self {
+    Self(label.to_owned())
+  }
+}
+
+impl From<String> for WindowLabel {
+  fn from(label: String) -> Self {
+    Self(label)
+  }
+}
+
+/// 一个待建窗口：标签 + 建窗参数。
+///
+/// 应用只声明它（`Builder::main_window` / `Builder::create_window`），建窗时机由运行时定。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSpec {
+  pub label: WindowLabel,
+  pub desc: WindowDesc,
+}
+
+impl WindowSpec {
+  /// 主窗口的描述（标签固定为 [`WindowLabel::MAIN`]）。
+  pub fn main(desc: WindowDesc) -> Self {
+    Self {
+      label: WindowLabel::new(WindowLabel::MAIN),
+      desc,
+    }
+  }
+}
 
 /// 建窗参数。
 #[derive(Debug, Clone, PartialEq)]

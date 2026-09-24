@@ -18,12 +18,15 @@ use std::fmt;
 pub enum Error {
   /// 平台后端失败：事件循环创建/运行、建窗等。
   Platform(String),
+  /// 装配期配置有误：窗口标签重复、占用保留标签等。
+  Config(String),
 }
 
 impl fmt::Display for Error {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Error::Platform(message) => write!(f, "平台错误：{message}"),
+      Error::Config(message) => write!(f, "配置错误：{message}"),
     }
   }
 }

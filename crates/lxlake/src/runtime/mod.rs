@@ -14,16 +14,18 @@ mod builder;
 mod clock;
 mod jobs;
 mod pump;
+mod window;
 
 pub use app::{App, AppContext};
 pub use builder::Builder;
 pub use clock::{Frame, FrameClock};
 pub use jobs::{JobContext, JobHandle, JobPool};
 pub use pump::{EventSource, PumpContext, Wakeup};
+pub use window::{Window, WindowRegistry};
 
 use crate::core::Error;
 use crate::core::event::Event;
-use crate::core::window::{WindowDesc, WindowId};
+use crate::core::window::{WindowId, WindowLabel, WindowSpec};
 use crate::platform;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,8 +47,8 @@ pub trait Application: 'static {
   /// 运行时 / 平台要用的上下文。
   fn context_mut(&mut self) -> &mut AppContext;
 
-  /// 启动时要创建的窗口。
-  fn windows(&self) -> Vec<WindowDesc>;
+  /// 启动时要创建的窗口。标签为 `main` 的那个即主窗口。
+  fn windows(&self) -> Vec<WindowSpec>;
 
   /// 目标帧间隔；`None` = 不限速。
   fn frame_interval(&self) -> Option<Duration>;
@@ -70,7 +72,97 @@ pub trait Application: 'static {
   fn on_shutdown(&mut self);
 }
 
-/// 启动应用：把控制权交给平台后端的事件循环，返回时应用已退出。
+/// 启动应用：先校验装配期配置（窗口标签），再把控制权交给平台后端的事件循环，返回时应用已退出。
 pub fn run(app: impl Application) -> Result<(), Error> {
+  validate_windows(&app.windows())?;
   platform::run(app)
+}
+
+/// 校验窗口声明：标签非空、互不重复，且保留标签 `main` 只归主窗口（列表首位那个）。
+///
+/// 放在这里而不是 `Builder` 里，是为了让**所有**入口（`Builder::run` 与直接
+/// `runtime::run`）走同一道闸。
+fn validate_windows(specs: &[WindowSpec]) -> Result<(), Error> {
+  let mut seen: Vec<&str> = Vec::with_capacity(specs.len());
+  for (index, spec) in specs.iter().enumerate() {
+    let label = spec.label.as_str();
+    if label.is_empty() {
+      return Err(Error::Config("窗口标签不能为空".to_owned()));
+    }
+    if seen.contains(&label) {
+      return Err(Error::Config(format!("窗口标签重复：{label}")));
+    }
+    if index > 0 && spec.label.is_main() {
+      return Err(Error::Config(format!(
+        "`{}` 是主窗口的保留标签（主窗口由 Builder::main_window 注入）",
+        WindowLabel::MAIN
+      )));
+    }
+    seen.push(label);
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::core::window::WindowDesc;
+
+  fn label(name: &str) -> WindowSpec {
+    WindowSpec {
+      label: WindowLabel::new(name),
+      desc: WindowDesc::default(),
+    }
+  }
+
+  #[test]
+  fn a_plain_main_window_passes() {
+    assert!(validate_windows(&[label(WindowLabel::MAIN)]).is_ok());
+    assert!(validate_windows(&[]).is_ok(), "无窗口应用也是合法的");
+  }
+
+  #[test]
+  fn extra_windows_with_distinct_labels_pass() {
+    let specs = [
+      label(WindowLabel::MAIN),
+      label("inspector"),
+      label("assets"),
+    ];
+
+    assert!(validate_windows(&specs).is_ok());
+  }
+
+  /// 标签是取窗的钥匙，重复了就有一把钥匙打不开门。
+  #[test]
+  fn duplicate_labels_are_refused() {
+    let specs = [
+      label(WindowLabel::MAIN),
+      label("inspector"),
+      label("inspector"),
+    ];
+
+    let err = validate_windows(&specs).expect_err("重复标签要拒");
+    assert!(matches!(err, Error::Config(_)));
+    assert!(
+      err.to_string().contains("inspector"),
+      "报错要点名是哪个标签"
+    );
+  }
+
+  /// `main` 是主窗口的保留标签：`create_window("main", ..)` 造出来的窗不是主窗口，
+  /// 再让它冒充就会让「主窗口」有两个答案。
+  #[test]
+  fn the_reserved_label_is_refused_for_extra_windows() {
+    let specs = [label("first"), label(WindowLabel::MAIN)];
+
+    assert!(matches!(validate_windows(&specs), Err(Error::Config(_)),));
+  }
+
+  #[test]
+  fn an_empty_label_is_refused() {
+    assert!(matches!(
+      validate_windows(&[label("")]),
+      Err(Error::Config(_))
+    ));
+  }
 }

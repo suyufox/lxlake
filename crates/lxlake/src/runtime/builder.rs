@@ -12,7 +12,7 @@ use super::app::{App, AppContext};
 use super::{Application, DEFAULT_FPS, Frame, Wakeup};
 use crate::core::Error;
 use crate::core::event::Event;
-use crate::core::window::{WindowDesc, WindowId};
+use crate::core::window::{WindowDesc, WindowId, WindowLabel, WindowSpec};
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +27,8 @@ type ShutdownHook = Box<dyn FnOnce(&mut App)>;
 pub struct Builder {
   /// 应用本体：托管状态与上下文在装配期就已经是运行期那一份。
   app: App,
-  windows: Vec<WindowDesc>,
+  /// 待建窗口。标签为主窗口的那个排在最前（`main_window` 换的就是它）。
+  windows: Vec<WindowSpec>,
   /// 目标帧间隔；`None` = 不限速。
   frame_interval: Option<Duration>,
   on_startup: Option<StartupHook>,
@@ -43,11 +44,14 @@ impl Default for Builder {
 }
 
 impl Builder {
-  /// 默认：一个默认窗口 + 60 帧的目标帧率。
+  /// 默认：没有窗口 + 60 帧的目标帧率。
+  ///
+  /// 窗口是显式声明的（[`Builder::main_window`] / [`Builder::create_window`]）——不隐式建窗，
+  /// 于是「无窗口应用」天然可表达（不声明窗口即可）。
   pub fn new() -> Self {
     Self {
       app: App::new(),
-      windows: vec![WindowDesc::default()],
+      windows: Vec::new(),
       frame_interval: Some(Duration::from_nanos(1_000_000_000 / u64::from(DEFAULT_FPS))),
       on_startup: None,
       on_event: None,
@@ -56,9 +60,22 @@ impl Builder {
     }
   }
 
-  /// 追加一个窗口。第一个即主窗口。
-  pub fn window(mut self, desc: WindowDesc) -> Self {
-    self.windows.push(desc);
+  /// 注入**主窗口**（标签固定为 `main`）。重复调用则后一次覆盖前一次。
+  pub fn main_window(mut self, desc: WindowDesc) -> Self {
+    let spec = WindowSpec::main(desc);
+    match self.windows.first_mut() {
+      Some(first) if first.label.is_main() => *first = spec,
+      _ => self.windows.insert(0, spec),
+    }
+    self
+  }
+
+  /// 再建一个窗口，用 `label` 标识它（`main` 是保留标签，用了会在 [`Builder::run`] 报错）。
+  pub fn create_window(mut self, label: impl Into<WindowLabel>, desc: WindowDesc) -> Self {
+    self.windows.push(WindowSpec {
+      label: label.into(),
+      desc,
+    });
     self
   }
 
@@ -113,7 +130,7 @@ impl Application for Builder {
     self.app.context_mut()
   }
 
-  fn windows(&self) -> Vec<WindowDesc> {
+  fn windows(&self) -> Vec<WindowSpec> {
     self.windows.clone()
   }
 
