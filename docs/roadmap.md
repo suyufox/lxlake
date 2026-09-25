@@ -207,8 +207,9 @@ android 不拉东西；装配面是 `Builder::webview`，摆位复用同一块 `
 自绘 UI 的**命中测试判据是同一条**（见[架构](architecture.md)的「webview 双线」）。demo 上就是右下角
 一块 320×200 的 wry 子窗口。
 
-按包验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 155 项、`--features render` 170 项、
-`--features webview-wry` 155 项、`cargo test -p lxlake-demo` 5 项全绿；`clippy --all-targets -D warnings`
+按包验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 187 项、`--features ui-render` 193 项、
+`--features render` 202 项、`--features webview-wry` 187 项、`cargo test -p lxlake-editor` 19 项、
+`cargo test -p lxlake-demo` 6 项全绿；`clippy --all-targets -D warnings`
 与 `cargo fmt --all --check` 无告警；`cargo build -p lxlake-editor` **不编 3D**
 （排版只用普通依赖 `ab_glyph`，不受 `render` 门控；wry 同样不在 editor 的图里）。剩下的是
 **实机看一眼** HUD 与覆盖层：覆盖层在最上（Tab 面板也盖不住它）、矩形内点击不挖方块也不转视角、
