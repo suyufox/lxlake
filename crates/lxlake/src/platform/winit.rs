@@ -170,11 +170,14 @@ impl<A: Application> Driver<A> {
   }
 
   /// 摘掉一个窗口：翻译表、注册表、应用回调三处同步，少一处就留下鬼影。
+  ///
+  /// 顺序是**先通知应用、再摘注册表**：应用侧的覆盖层与渲染器都在这一刻按 id 反查窗口（要标签、
+  /// 要句柄），注册表先摘了它们就找不着父窗口了。
   fn destroy_window(&mut self, id: WindowId) {
     self.window_ids.retain(|(_, contract)| *contract != id);
-    self.app.context_mut().remove_window(id);
     tracing::debug!(window = id.0, "摘窗");
     self.app.on_window_destroyed(id);
+    self.app.context_mut().remove_window(id);
   }
 
   /// 出一帧：推进时钟并交给应用。

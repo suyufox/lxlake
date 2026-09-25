@@ -10,6 +10,7 @@ use super::exec::{AsyncRuntime, Mailbox};
 use super::jobs::JobPool;
 use super::pump::{EventSource, PumpContext, Wakeup};
 use super::window::{Window, WindowRegistry};
+use crate::capability::webview::{OverlayId, WebViewHandle};
 use crate::core::window::{WindowHandle, WindowId, WindowLabel};
 #[cfg(feature = "render")]
 use crate::render::Renderer;
@@ -192,6 +193,11 @@ pub struct App {
   /// 渲染器：**按窗一份**，窗口建好时惰建（见 `Builder::renderer`）。
   #[cfg(feature = "render")]
   gpu: BTreeMap<WindowId, Renderer>,
+  /// 覆盖层：**按「窗口 + 覆盖层 id」一份**，窗口建好时惰建（见 `Builder::webview`）。
+  ///
+  /// 与渲染器不同，这里没有 feature 门控：`capability::webview` 的接口层常编译，没有后端时压根
+  /// 建不出东西来，这张表自然是空的。键里带窗口是因为同一个 `OverlayId` 可以挂在不同窗口上。
+  webviews: BTreeMap<(WindowId, OverlayId), Box<dyn WebViewHandle>>,
 }
 
 impl App {
@@ -204,6 +210,7 @@ impl App {
       exec: None,
       #[cfg(feature = "render")]
       gpu: BTreeMap::new(),
+      webviews: BTreeMap::new(),
     }
   }
 
@@ -233,6 +240,34 @@ impl App {
   /// 窗口数量。
   pub fn window_count(&self) -> usize {
     self.cx.window_count()
+  }
+
+  /// 某个窗口上的覆盖层（按窗口标签 + 覆盖层 id）。
+  ///
+  /// 拿到的句柄可以改矩形、导航、跑脚本——`set_visible` 能临时把它藏起来（藏起来时下层照画）。
+  /// 覆盖层是**原生子窗口**，不参与 z 序与裁剪：它永远浮在画面与自绘 UI 之上。
+  ///
+  /// 句柄的生命周期写死 `'static` 是因为 `Box` 自己持有它（不借别处）；而这个 `+ 'static` 必须
+  /// 写出来——`&mut` 在对象生命周期上是不变的，省掉它就得不出这个引用。
+  pub fn webview(
+    &mut self,
+    window_label: &str,
+    id: OverlayId,
+  ) -> Option<&mut (dyn WebViewHandle + 'static)> {
+    let window = self.cx.window(window_label)?.id();
+    self.webview_mut(window, id)
+  }
+
+  /// 某个窗口上的全部覆盖层，按覆盖层 id 升序。
+  pub fn webviews(
+    &self,
+    window_label: &str,
+  ) -> impl Iterator<Item = (OverlayId, &dyn WebViewHandle)> {
+    let window = self.cx.window(window_label).map(|window| window.id());
+    self
+      .webviews
+      .iter()
+      .filter_map(move |(&(id, overlay), view)| (window == Some(id)).then_some((overlay, &**view)))
   }
 
   /// 请求退出事件循环。
@@ -354,13 +389,22 @@ impl App {
     Some(result)
   }
 
-  /// 某个窗口的平台句柄（运行时内部用：建渲染器）。
-  #[cfg(feature = "render")]
+  /// 某个窗口的平台句柄（运行时内部用：建渲染器、建覆盖层）。
   pub(crate) fn window_handle(&self, id: WindowId) -> Option<Arc<dyn WindowHandle>> {
     self
       .cx
       .window_by_id(id)
       .map(|window| Arc::clone(window.handle()))
+  }
+
+  /// 按窗口 id 取覆盖层（运行时内部用：resize / DPI 变化后重算摆位）。生命周期口径同
+  /// [`App::webview`]。
+  pub(crate) fn webview_mut(
+    &mut self,
+    window: WindowId,
+    id: OverlayId,
+  ) -> Option<&mut (dyn WebViewHandle + 'static)> {
+    self.webviews.get_mut(&(window, id)).map(|view| &mut **view)
   }
 
   /// 某个窗口的渲染器。
@@ -406,11 +450,34 @@ impl App {
   pub(crate) fn clear_gpu(&mut self) {
     self.gpu.clear();
   }
+
+  /// 某个窗口的覆盖层建好了。同一「窗口 + id」再建即覆盖（旧的先释放，不会同时挂着两个原生子窗口）。
+  pub(crate) fn insert_webview(
+    &mut self,
+    window: WindowId,
+    id: OverlayId,
+    view: Box<dyn WebViewHandle>,
+  ) {
+    self.webviews.insert((window, id), view);
+  }
+
+  /// 收回某个窗口的全部覆盖层：窗口没了，原生子窗口必须跟着放掉。
+  pub(crate) fn remove_webviews(&mut self, window: WindowId) {
+    self.webviews.retain(|(id, _), _| *id != window);
+  }
+
+  /// 收回全部覆盖层。生命周期末尾调（原生子窗口挂在父窗口上，要在窗口之前放）。
+  pub(crate) fn clear_webviews(&mut self) {
+    self.webviews.clear();
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::capability::webview::Mode;
+  use crate::core::geometry::{LogicalRect, PhysicalSize};
+  use crate::core::window::WindowHandle;
   use std::sync::atomic::{AtomicUsize, Ordering};
   use std::time::Duration;
 
@@ -668,5 +735,108 @@ mod tests {
       None,
       "没登记过就是 None"
     );
+  }
+
+  /// 只要一个「能登记进注册表」的句柄：覆盖层表按 id 记账，句柄内容无关。
+  struct FakeWindow(WindowId);
+
+  impl raw_window_handle::HasWindowHandle for FakeWindow {
+    fn window_handle(
+      &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+      Err(raw_window_handle::HandleError::Unavailable)
+    }
+  }
+
+  impl raw_window_handle::HasDisplayHandle for FakeWindow {
+    fn display_handle(
+      &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+      Err(raw_window_handle::HandleError::Unavailable)
+    }
+  }
+
+  impl WindowHandle for FakeWindow {
+    fn id(&self) -> WindowId {
+      self.0
+    }
+
+    fn size(&self) -> PhysicalSize {
+      PhysicalSize::new(0, 0)
+    }
+
+    fn scale_factor(&self) -> f64 {
+      1.0
+    }
+
+    fn set_title(&self, _title: &str) {}
+
+    fn set_cursor_grab(&self, _grab: bool) {}
+
+    fn set_cursor_visible(&self, _visible: bool) {}
+  }
+
+  /// 假覆盖层：表只按 id 记账，句柄内容无关，所以它什么都不用记。
+  struct FakeView;
+
+  impl WebViewHandle for FakeView {
+    fn mode(&self) -> Mode {
+      Mode::Overlay
+    }
+
+    fn bounds(&self) -> LogicalRect {
+      LogicalRect::new(0.0, 0.0, 0.0, 0.0)
+    }
+
+    fn set_bounds(&mut self, _rect: LogicalRect) {}
+
+    fn set_visible(&mut self, _visible: bool) {}
+
+    fn navigate(&mut self, _url: &str) {}
+
+    fn evaluate_script(&mut self, _js: &str) {}
+
+    fn close(&mut self) {}
+  }
+
+  fn app_with_two_windows() -> App {
+    let mut app = App::new();
+    for (id, label) in [(0, WindowLabel::MAIN), (1, "inspector")] {
+      let id = WindowId(id);
+      app
+        .context_mut()
+        .insert_window(id, &WindowLabel::new(label), Arc::new(FakeWindow(id)));
+    }
+    app
+  }
+
+  /// 覆盖层按「窗口 + id」记账：标签查得到、别的窗口上是**另一份**、摘窗只摘自己那份。
+  #[test]
+  fn overlays_are_booked_per_window_and_id() {
+    let mut app = app_with_two_windows();
+    app.insert_webview(WindowId(0), OverlayId(1), Box::new(FakeView));
+    app.insert_webview(WindowId(1), OverlayId(1), Box::new(FakeView));
+
+    assert!(app.webview(WindowLabel::MAIN, OverlayId(1)).is_some());
+    assert!(
+      app.webview("inspector", OverlayId(1)).is_some(),
+      "同一个 id 在别的窗口上是另一份"
+    );
+    assert!(app.webview(WindowLabel::MAIN, OverlayId(2)).is_none());
+    assert!(
+      app.webview("nowhere", OverlayId(1)).is_none(),
+      "窗口不在就查不到"
+    );
+    assert_eq!(app.webviews(WindowLabel::MAIN).count(), 1);
+
+    app.remove_webviews(WindowId(0));
+    assert!(app.webview(WindowLabel::MAIN, OverlayId(1)).is_none());
+    assert!(
+      app.webview("inspector", OverlayId(1)).is_some(),
+      "别的窗口不受影响"
+    );
+
+    app.clear_webviews();
+    assert_eq!(app.webviews("inspector").count(), 0);
   }
 }

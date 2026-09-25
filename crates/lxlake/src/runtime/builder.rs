@@ -12,15 +12,18 @@ use super::app::{App, AppContext};
 use super::exec::{AsyncConfig, AsyncRuntime};
 use super::log::LogConfig;
 use super::{Application, DEFAULT_FPS, Frame, JobPool, Wakeup};
+use crate::capability::webview::{OverlayId, OverlaySpec, create_overlay};
 use crate::core::Error;
 use crate::core::event::Event;
+use crate::core::geometry::PhysicalSize;
 #[cfg(feature = "render")]
 use crate::core::window::WindowHandle;
 use crate::core::window::{WindowDesc, WindowId, WindowLabel, WindowSpec};
 #[cfg(feature = "render")]
 use crate::render::{RenderError, Renderer};
-use crate::ui::TextShaper;
+use crate::ui::{TextShaper, place};
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,6 +61,8 @@ pub struct Builder {
   app_id: String,
   /// 待建窗口。标签为主窗口的那个排在最前（`main_window` 换的就是它）。
   windows: Vec<WindowSpec>,
+  /// 待建覆盖层：窗口就绪时按窗惰建（见 [`Builder::webview`]）。
+  overlays: Vec<OverlaySpec>,
   /// 目标帧间隔；`None` = 不限速。
   frame_interval: Option<Duration>,
   /// 作业线程数；`None` = 不建作业池。
@@ -97,6 +102,7 @@ impl Builder {
       app: App::new(),
       app_id: DEFAULT_APP_ID.to_owned(),
       windows: Vec::new(),
+      overlays: Vec::new(),
       frame_interval: Some(Duration::from_nanos(1_000_000_000 / u64::from(DEFAULT_FPS))),
       workers: None,
       font: None,
@@ -136,6 +142,19 @@ impl Builder {
       label: label.into(),
       desc,
     });
+    self
+  }
+
+  /// 挂一个 webview **覆盖层**（`OverlaySpec::window` 可以把它改挂到非主窗口上）。
+  ///
+  /// 覆盖层是**原生子窗口**：永远浮在画面与自绘 UI 之上，不参与 z 序与裁剪。摆位数据与自绘共用
+  /// 同一份 [`Widget`](crate::core::widget::Widget)——矩形由 `ui::place` 按视口算出，所以 resize 与
+  /// DPI 变化时它会跟自绘一起挪。
+  ///
+  /// 同一个窗口上的 [`OverlayId`] 不许重复、挂的窗口标签必须存在，两条都在 [`Builder::run`] 装配期
+  /// 校验；建不出来（没有后端、后端失败）只报一声，应用照常跑（与渲染器 / 字体同一口径）。
+  pub fn webview(mut self, spec: OverlaySpec) -> Self {
+    self.overlays.push(spec);
     self
   }
 
@@ -235,7 +254,9 @@ impl Builder {
   /// [`Builder::run_android`]。
   #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
   pub fn run(self) -> Result<(), Error> {
-    super::run(self.apply_plugins())
+    let builder = self.apply_plugins();
+    builder.validate_overlays()?;
+    super::run(builder)
   }
 
   /// android 版 [`Builder::run`]：多一件系统递进来的 activity。
@@ -244,7 +265,9 @@ impl Builder {
   /// 由 `#[lxlake::entry]` 生成的 `android_main` 调用。
   #[cfg(target_os = "android")]
   pub fn run_android(self, android_app: crate::platform::AndroidApp) -> Result<(), Error> {
-    super::run_android(android_app, self.apply_plugins())
+    let builder = self.apply_plugins();
+    builder.validate_overlays()?;
+    super::run_android(android_app, builder)
   }
 
   /// 应用插件：按加入顺序依次改写装配。
@@ -256,6 +279,34 @@ impl Builder {
       self = plugin.configure(self);
     }
     self
+  }
+
+  /// 装配期校验覆盖层声明：挂的窗口得在，且**同一窗口**上 [`OverlayId`] 不重复。
+  ///
+  /// 放在进入运行时之前（与 `runtime::validate_windows` 同一口径）：配置错该在启动前报出来，
+  /// 而不是等某个窗口建好时才发现建不出来。同一个 id 挂到**不同**窗口上是允许的——运行期的表
+  /// 按「窗口 + id」记账。
+  fn validate_overlays(&self) -> Result<(), Error> {
+    let mut seen: BTreeSet<(&str, OverlayId)> = BTreeSet::new();
+    for spec in &self.overlays {
+      if !self
+        .windows
+        .iter()
+        .any(|window| window.label == spec.window)
+      {
+        return Err(Error::Config(format!(
+          "覆盖层 {} 挂在不存在的窗口 `{}` 上",
+          spec.id.0, spec.window
+        )));
+      }
+      if !seen.insert((spec.window.as_str(), spec.id)) {
+        return Err(Error::Config(format!(
+          "窗口 `{}` 上的覆盖层 id 重复：{}",
+          spec.window, spec.id.0
+        )));
+      }
+    }
+    Ok(())
   }
 
   /// 装配期把能力建起来。作业池要唤醒句柄（此刻已由平台注入），字体在这里读一次；
@@ -280,23 +331,34 @@ impl Builder {
     }
   }
 
-  /// 收干净能力：渲染器要在**窗口之前**放——表面挂着窗口句柄，等窗口没了再放就要处理
-  /// 「表面活过了窗口」。异步运行时也在这里收：宿主线程关停并 join，别让它活到进程退出之后。
+  /// 收干净能力：渲染器与覆盖层要在**窗口之前**放——前者表面挂着窗口句柄、后者是原生子窗口，
+  /// 等窗口没了再放就要处理「活过了窗口」。异步运行时也在这里收：宿主线程关停并 join，别让它
+  /// 活到进程退出之后。
   fn release_capabilities(&mut self) {
+    self.app.clear_webviews();
     #[cfg(feature = "render")]
     self.app.clear_gpu();
     self.app.clear_exec();
   }
 
-  /// 引擎内建的窗口事件转发：resize / DPI 变化先落到**该窗**的渲染器上，再进应用闭包。
+  /// 引擎内建的窗口事件转发：resize / DPI 变化先落到**该窗**的渲染器与覆盖层上，再进应用闭包。
   ///
-  /// 这段是每个应用都要写一遍的纯样板（表面重配 + 深度附件重建 + 换算比例），所以收进引擎。
+  /// 这段是每个应用都要写一遍的纯样板（表面重配 + 深度附件重建 + 换算比例 + 覆盖层重摆），
+  /// 所以收进引擎。
   fn forward_window_event(&mut self, event: &Event) {
-    #[cfg(feature = "render")]
     match event {
       Event::Resized { window, size } => {
+        #[cfg(feature = "render")]
         if let Some(renderer) = self.app.gpu_mut(*window) {
           renderer.resize(*size);
+        }
+        // 比例从窗口句柄上读：resize 时它已经是新的了。
+        if let Some(scale_factor) = self
+          .app
+          .window_handle(*window)
+          .map(|handle| handle.scale_factor())
+        {
+          self.place_overlays(*window, *size, scale_factor);
         }
       }
       Event::ScaleFactorChanged {
@@ -304,15 +366,15 @@ impl Builder {
         scale_factor,
         size,
       } => {
+        #[cfg(feature = "render")]
         if let Some(renderer) = self.app.gpu_mut(*window) {
           renderer.set_scale_factor(*scale_factor);
           renderer.resize(*size);
         }
+        self.place_overlays(*window, *size, *scale_factor);
       }
       _ => {}
     }
-    #[cfg(not(feature = "render"))]
-    let _ = event;
   }
 
   /// 窗口刚建好：按窗惰建渲染器（没配 `renderer` 就什么都不做）。
@@ -332,6 +394,72 @@ impl Builder {
     }
     #[cfg(not(feature = "render"))]
     let _ = id;
+  }
+
+  /// 窗口刚建好：按窗惰建覆盖层（这一窗没声明就什么都不做）。
+  ///
+  /// 父窗口句柄走 [`App::window_handle`]（唯一的平台缝），视口由**这一窗**的物理尺寸换算，矩形与
+  /// 自绘共用 `ui::place`。失败只报一声（与渲染器 / 字体同一口径），应用照常跑。
+  fn build_overlays(&mut self, id: WindowId) {
+    let Some(label) = self.label_of(id) else {
+      return;
+    };
+    if self.overlays_of(&label).next().is_none() {
+      return;
+    }
+    let Some(handle) = self.app.window_handle(id) else {
+      return;
+    };
+    let viewport = handle.size().to_logical(handle.scale_factor());
+    // 先按标签把声明抄出来：下面要可变借 `self.app`，不能再借着 `self.overlays` 迭代。
+    let specs: Vec<OverlaySpec> = self.overlays_of(&label).cloned().collect();
+    for spec in specs {
+      let rect = place(&spec.widget, viewport);
+      match create_overlay(&handle, &spec.config, rect) {
+        Ok(view) => self.app.insert_webview(id, spec.id, view),
+        Err(error) => {
+          eprintln!(
+            "lxlake: 建覆盖层失败（窗口 {label} / 覆盖层 {}）：{error}",
+            spec.id.0
+          );
+        }
+      }
+    }
+  }
+
+  /// 重算并落地某个窗口全部覆盖层的矩形（resize / DPI 变化后调）。
+  ///
+  /// 摆位数据与视口的算法与 [`Builder::build_overlays`] 完全相同，所以覆盖层与它下面那块自绘的
+  /// 矩形**逐位相同**——不会出现「自绘挪了、原生子窗口没挪」。
+  fn place_overlays(&mut self, id: WindowId, size: PhysicalSize, scale_factor: f64) {
+    let Some(label) = self.label_of(id) else {
+      return;
+    };
+    let viewport = size.to_logical(scale_factor);
+    let specs: Vec<OverlaySpec> = self.overlays_of(&label).cloned().collect();
+    for spec in specs {
+      if let Some(view) = self.app.webview_mut(id, spec.id) {
+        view.set_bounds(place(&spec.widget, viewport));
+      }
+    }
+  }
+
+  /// 窗口 id → 标签：覆盖层的声明按标签挂，运行期的表按 id 记账。
+  fn label_of(&mut self, id: WindowId) -> Option<WindowLabel> {
+    self
+      .app
+      .context_mut()
+      .window_by_id(id)
+      .map(|window| window.label().clone())
+  }
+
+  /// 这一窗声明的覆盖层，按声明顺序。
+  fn overlays_of<'a>(&'a self, label: &WindowLabel) -> impl Iterator<Item = &'a OverlaySpec> + 'a {
+    let label = label.clone();
+    self
+      .overlays
+      .iter()
+      .filter(move |spec| spec.window == label)
   }
 }
 
@@ -374,13 +502,14 @@ impl Application for Builder {
 
   fn on_window_ready(&mut self, id: WindowId) {
     self.build_renderer(id);
+    self.build_overlays(id);
   }
 
   fn on_window_destroyed(&mut self, id: WindowId) {
     #[cfg(feature = "render")]
     self.app.remove_gpu(id);
-    #[cfg(not(feature = "render"))]
-    let _ = id;
+    // 覆盖层是父窗口的子窗口：父窗口还没摘（见 `platform::winit` 的摘窗顺序），先把它放掉。
+    self.app.remove_webviews(id);
   }
 
   fn on_startup(&mut self) {
@@ -416,6 +545,9 @@ impl Application for Builder {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::capability::webview::WebViewConfig;
+  use crate::core::geometry::LogicalSize;
+  use crate::core::widget::{Anchor, UiId, Widget};
   use crate::core::window::WindowHandle;
   use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -606,5 +738,76 @@ mod tests {
       window: WindowId(0),
       size: crate::core::geometry::PhysicalSize::new(800, 600),
     });
+  }
+
+  /// 覆盖层声明在装配期校验：挂的窗口得在，且**同一窗口**上 id 不许重复。
+  #[test]
+  fn overlay_specs_are_validated_at_assembly_time() {
+    let spec = || {
+      OverlaySpec::new(
+        OverlayId(1),
+        Widget::new(UiId(1), Anchor::BottomRight, LogicalSize::new(320.0, 200.0)),
+        WebViewConfig::html("<p>hi</p>"),
+      )
+    };
+
+    let builder = Builder::new()
+      .main_window(WindowDesc::default())
+      .webview(spec())
+      .webview(spec());
+    let error = builder
+      .validate_overlays()
+      .expect_err("同一窗口上 id 重复该在装配期报出来");
+    assert!(
+      format!("{error}").contains("重复"),
+      "报错要点明是 id 重复：{error}"
+    );
+
+    let builder = Builder::new()
+      .main_window(WindowDesc::default())
+      .webview(spec().window("ghost"));
+    assert!(
+      builder.validate_overlays().is_err(),
+      "挂在不存在的窗口上要报错"
+    );
+
+    let builder = Builder::new()
+      .main_window(WindowDesc::default())
+      .create_window("inspector", WindowDesc::default())
+      .webview(spec())
+      .webview(spec().window("inspector"));
+    assert!(
+      builder.validate_overlays().is_ok(),
+      "同一个 id 挂到不同窗口上是合法的"
+    );
+  }
+
+  /// 覆盖层没建出来时（没后端，或后端失败）resize 重摆位是安静的：不 panic、也不凭空多出覆盖层。
+  #[test]
+  fn placing_overlays_without_a_backend_is_quiet() {
+    let mut builder = Builder::new()
+      .main_window(WindowDesc::default())
+      .webview(OverlaySpec::new(
+        OverlayId(1),
+        Widget::new(UiId(1), Anchor::BottomRight, LogicalSize::new(320.0, 200.0)),
+        WebViewConfig::html("<p>hi</p>"),
+      ));
+    builder.app.context_mut().insert_window(
+      WindowId(0),
+      &WindowLabel::new(WindowLabel::MAIN),
+      Arc::new(FakeWindow(WindowId(0))),
+    );
+
+    builder.place_overlays(
+      WindowId(0),
+      crate::core::geometry::PhysicalSize::new(800, 600),
+      1.0,
+    );
+
+    assert_eq!(
+      builder.app.webviews(WindowLabel::MAIN).count(),
+      0,
+      "建不出覆盖层，表里就没有东西"
+    );
   }
 }
