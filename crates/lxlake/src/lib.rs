@@ -12,6 +12,7 @@
 //! - [`meshing`] —— 区块 → 网格（纯 CPU，POD 顶点）
 //! - [`camera`] —— 自由飞行相机
 //! - [`ui`] —— 自绘 UI：布局、命中测试、文本排版（纯 CPU）
+//! - [`capability`] —— 可选横切能力（webview 等）：接口常编译，重依赖关在 feature 之后
 //! - `render` —— wgpu 渲染管线，全部落在 `render` 特性之后
 //!
 //! `world` / `meshing` / `camera` / `ui` 是引擎侧概念，但都是**纯 CPU**（不含任何 GPU 类型），
@@ -20,6 +21,7 @@
 //! 构建一律按包进行（`cargo build -p lxlake-demo`），不跑 `--workspace`。
 
 pub mod camera;
+pub mod capability;
 pub mod core;
 pub mod meshing;
 pub mod path;

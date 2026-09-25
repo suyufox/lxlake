@@ -92,7 +92,10 @@ impl UiTree {
 }
 
 /// 锚定摆位：先按九宫格归一化坐标贴到锚点，再沿屏幕方向加偏移。
-fn place(widget: &Widget, viewport: LogicalSize) -> LogicalRect {
+///
+/// **唯一的摆位实现**——自绘与原生覆盖层共用它：自绘把结果交给渲染，覆盖层把同一个矩形交给原生
+/// 子窗口（见 `capability::webview`）。接覆盖层时不必另写一套「覆盖层专用布局」。
+pub fn place(widget: &Widget, viewport: LogicalSize) -> LogicalRect {
   let [fx, fy] = widget.anchor.normalized();
   LogicalRect::new(
     (viewport.width - widget.size.width) * fx + widget.offset[0],
