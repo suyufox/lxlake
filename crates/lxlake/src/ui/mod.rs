@@ -23,7 +23,7 @@ mod text;
 
 pub use doc::{
   ANCHOR_NAMES, DocNode, Document, NODE_PROPS, NodeId, Prop, PropDesc, PropKind, PropValue,
-  default_of, instantiate,
+  default_of, from_lxml, instantiate,
 };
 pub use draw::{Quad, QuadSource};
 pub use lxml::{DiagnosticSeverity, LxmlDiagnostic, StaticNode, parse_lxml};
@@ -70,9 +70,12 @@ impl UiTree {
 
   /// 按**任意容器矩形**算摆位。
   ///
-  /// 编辑器的预览区、将来面板内部都用它：文档节点锚进一个**算出来的**区域，于是文档里永远
+  /// 编辑器的预览区、面板内部都用它：文档节点锚进一个**算出来的**区域，于是文档里永远
   /// 不含窗口尺寸（否则存盘会把某台机器的分辨率存进去）。摆位结果仍是绝对坐标，命中测试
   /// 因此不需要任何坐标转换（见 [`Placed`]）。
+  ///
+  /// 注意它**一次只认一个容器**：层级摆位（子节点的容器是父节点的矩形）走不了这条，见
+  /// [`UiTree::add_placed`]。
   pub fn layout_in(&mut self, area: LogicalRect) {
     self.placed = self
       .widgets
@@ -83,6 +86,19 @@ impl UiTree {
         overlay: widget.overlay,
       })
       .collect();
+  }
+
+  /// 加一个**已经算好矩形**的 Widget。
+  ///
+  /// 给层级摆位用：`instantiate` 的每个节点各有各的容器（父的矩形），而 [`UiTree::layout_in`]
+  /// 一次只认一个。走这条建出来的树是**摆好的**——再调 `layout_in` 会按单一容器重算，把层级压平。
+  pub fn add_placed(&mut self, widget: Widget, rect: LogicalRect) {
+    self.placed.push(Placed {
+      id: widget.id,
+      rect,
+      overlay: widget.overlay,
+    });
+    self.widgets.push(widget);
   }
 
   /// 算好的摆位（加入顺序）。
@@ -300,5 +316,21 @@ mod tests {
 
     assert_eq!(inside.x, at_origin.x + 300.0);
     assert_eq!(inside.y, at_origin.y + 200.0);
+  }
+
+  /// `add_placed` 记的是**给它的**矩形，不按容器重算——层级摆位（子的容器 = 父的矩形）走这条。
+  #[test]
+  fn add_placed_keeps_the_rect_it_was_given() {
+    let mut tree = UiTree::new();
+    let rect = LogicalRect::new(10.0, 20.0, 100.0, 40.0);
+
+    tree.add_placed(widget(1, Anchor::Center, 100.0, 40.0), rect);
+
+    assert_eq!(tree.rect_of(UiId(1)), Some(rect));
+    assert_eq!(
+      tree.hit_test(LogicalPosition::new(60.0, 40.0)),
+      Some(UiId(1)),
+      "加进来就能命中，不必先跑一遍 `layout_in`"
+    );
   }
 }

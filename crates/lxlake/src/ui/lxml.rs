@@ -70,7 +70,8 @@ impl DiagnosticSeverity {
 /// 一条解析诊断。**1-based 行列**（按字符计），编辑器可以直接拿去定位。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LxmlDiagnostic {
-  /// 起始行（1-based）。
+  /// 起始行（1-based）。**0 表示没有源位置**——语义阶段的诊断（属性映射、文本处理）不落在
+  /// 某个字符上，见 [`LxmlDiagnostic::without_position`]。
   pub line: usize,
   /// 起始列（1-based，按字符计）。
   pub column: usize,
@@ -80,6 +81,22 @@ pub struct LxmlDiagnostic {
   pub severity: DiagnosticSeverity,
   /// 面向用户的文案（中文，可直接展示在编辑器或 CLI 里）。
   pub message: String,
+}
+
+impl LxmlDiagnostic {
+  /// 一条**没有源位置**的诊断（`line = column = 0`）。
+  ///
+  /// 给语义阶段用：属性映射、文本处理这些判断落在**节点或属性**上，而 [`StaticNode`] 只带属性值
+  /// 与子节点，不带各自的坐标。将来要把它们指到某个字符上，得先让解析器把位置一起留下来。
+  pub fn without_position(severity: DiagnosticSeverity, message: String) -> Self {
+    Self {
+      line: 0,
+      column: 0,
+      length: 0,
+      severity,
+      message,
+    }
+  }
 }
 
 /// 把 `.lxml` 源文本解析成一棵树，附带诊断。
