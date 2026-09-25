@@ -12,7 +12,7 @@ use super::pump::{EventSource, PumpContext, Wakeup};
 use super::window::{Window, WindowRegistry};
 use crate::capability::webview::{OverlayId, WebViewHandle};
 use crate::core::window::{WindowHandle, WindowId, WindowLabel};
-#[cfg(feature = "render")]
+#[cfg(feature = "gpu")]
 use crate::render::Renderer;
 use crate::ui::TextShaper;
 use std::any::{Any, TypeId};
@@ -172,7 +172,7 @@ pub struct Capabilities<'a> {
   /// 文本排版器：`Builder::font_path` / `Builder::font_bytes` 配过、且字体读得进来才有。
   pub text: Option<&'a mut TextShaper>,
   /// **主窗口**的渲染器：`Builder::renderer` 配过才有。
-  #[cfg(feature = "render")]
+  #[cfg(feature = "gpu")]
   pub gpu: Option<&'a mut Renderer>,
 }
 
@@ -191,7 +191,7 @@ pub struct App {
   /// 异步运行时：装配期按 `Builder::async_runtime` 起，运行期只读借出。
   exec: Option<AsyncRuntime>,
   /// 渲染器：**按窗一份**，窗口建好时惰建（见 `Builder::renderer`）。
-  #[cfg(feature = "render")]
+  #[cfg(feature = "gpu")]
   gpu: BTreeMap<WindowId, Renderer>,
   /// 覆盖层：**按「窗口 + 覆盖层 id」一份**，窗口建好时惰建（见 `Builder::webview`）。
   ///
@@ -208,7 +208,7 @@ impl App {
       jobs: None,
       text: None,
       exec: None,
-      #[cfg(feature = "render")]
+      #[cfg(feature = "gpu")]
       gpu: BTreeMap::new(),
       webviews: BTreeMap::new(),
     }
@@ -372,12 +372,12 @@ impl App {
   ) -> Option<R> {
     let mut state = self.managed.remove(&TypeId::of::<T>())?;
     // 渲染器按主窗口取：上面那句文档说的就是这个 `main`。
-    #[cfg(feature = "render")]
+    #[cfg(feature = "gpu")]
     let main = self.cx.main_window().map(|window| window.id());
     let capabilities = Capabilities {
       jobs: self.jobs.as_ref(),
       text: self.text.as_mut(),
-      #[cfg(feature = "render")]
+      #[cfg(feature = "gpu")]
       gpu: main.and_then(|id| self.gpu.get_mut(&id)),
     };
     let result = f(
@@ -408,7 +408,7 @@ impl App {
   }
 
   /// 某个窗口的渲染器。
-  #[cfg(feature = "render")]
+  #[cfg(feature = "gpu")]
   pub(crate) fn gpu_mut(&mut self, id: WindowId) -> Option<&mut Renderer> {
     self.gpu.get_mut(&id)
   }
@@ -434,19 +434,19 @@ impl App {
   }
 
   /// 某个窗口的渲染器建好了。同一窗口再建即覆盖（旧的先释放，表面不会挂着两个）。
-  #[cfg(feature = "render")]
+  #[cfg(feature = "gpu")]
   pub(crate) fn insert_gpu(&mut self, id: WindowId, renderer: Renderer) {
     self.gpu.insert(id, renderer);
   }
 
   /// 收回某个窗口的渲染器：窗口没了，表面必须跟着放掉。
-  #[cfg(feature = "render")]
+  #[cfg(feature = "gpu")]
   pub(crate) fn remove_gpu(&mut self, id: WindowId) {
     self.gpu.remove(&id);
   }
 
   /// 收回全部渲染器。生命周期末尾调（表面挂窗口句柄，要在窗口之前放）。
-  #[cfg(feature = "render")]
+  #[cfg(feature = "gpu")]
   pub(crate) fn clear_gpu(&mut self) {
     self.gpu.clear();
   }

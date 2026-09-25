@@ -18,18 +18,20 @@ lxlake-macros = { workspace = true }
 # `AndroidApp` 也由 winit 再导出，因此不直接依赖 android-activity / ndk / jni。
 winit = "0.30.13"
 
-# 渲染（M1 起实装）：全部落在 render 特性之后。
-# naga 的主版本必须跟 wgpu 内部用的那套对齐（wgpu 30 → naga 30），否则包里会出现
-# 两个 naga，类型互不兼容。
+# 渲染（M1 起实装）：分三档、单调递增，全部落在 feature 之后（见 docs/architecture.md
+# 的「feature 分档」）。三档不是按概念切的，是按**消费者**切的：
+#   gpu        设备 / 队列 / 表面 / 配置 / resize / 取帧 / present——地板档
+#   ui-render  + render/ui.rs：方片管线与 UI 字形图集（框架主线的自绘 UI 走这一档）
+#   render     + 3D：管线 / 方块图集 / shader.wgsl / 深度与阴影 / 区块资源
 wgpu = { version = "30", optional = true }
-naga = { version = "30", optional = true }
 
 # raw-window-handle 是**中性 ABI 契约**，不是 winit / wgpu 的类型：`core::window::WindowHandle`
 # 拿它表达「我能给出原生窗口句柄」，渲染侧因此能直接建表面而不必认识 winit。winit 与 wgpu
 # 本来就用它，依赖图上零增量。
 raw-window-handle = "0.6"
 # 顶点 / uniform 的字节视图：CPU 结构与 GPU 布局的对照由 `Pod` 在编译期锁住。
-# wgpu 自己就依赖它，开渲染时依赖图上零增量；不开渲染则连它一起省掉（见 `meshing::Vertex`）。
+# wgpu 自己就依赖它，开渲染时依赖图上零增量；`ui-render` 起才需要（UI 顶点要它），
+# 只开 `gpu` 则连它一起省掉（见 `meshing::Vertex`）。
 bytemuck = { version = "1", features = ["derive"], optional = true }
 glam = "0.33.9"
 crossbeam-deque = "0.8.8"
@@ -51,7 +53,12 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync"] }
 
 [features]
 default = []
-render = ["dep:wgpu", "dep:naga", "dep:bytemuck"]
+# 渲染三档，单调递增：gpu ⊂ ui-render ⊂ render。
+# 只开 `gpu` 的消费者是**将来**的 CEF 纹理模式（要设备 / 队列 / 表面 / 取帧与纹理导入，
+# 但不要方片管线），今天还没有调用方——守卫只有 `cargo build -p lxlake --features gpu`。
+gpu = ["dep:wgpu"]
+ui-render = ["gpu", "dep:bytemuck"]
+render = ["ui-render"]
 # Windows 上的 wry 覆盖层后端：`capability::webview` 的重依赖那一半，实装见
 # `capability/webview/wry.rs`。特性不开（或不在 Windows）时由同目录的 `unsupported.rs` 垫底，
 # 能力查询答「不支持」——于是没有后端也不影响框架主线编译。

@@ -31,7 +31,7 @@
 
 验收：`cargo run -p lxlake-demo` 出一个空窗口，60fps 稳定，缩放与 DPI 变化正确响应。
 
-**已交付**：`core` / `runtime` / `platform` / `render` 骨架就位，`#[lxlake::entry]` 可用。demo 实测稳定 60fps，resize 响应正确；`cargo build -p lxlake-editor` 的依赖图里 wgpu / naga 出现 **0 次**。外部事件源 / pump 交的是**接口 + 调度**（源声明截止时间、运行时按最早者设 `WaitUntil`；跨线程唤醒走 `EventLoopProxy`），不含任何 wry / CEF 实现——webview 线的第一件事就是拿它核对 ~10ms 泵的语义。
+**已交付**：`core` / `runtime` / `platform` / `render` 骨架就位，`#[lxlake::entry]` 可用。demo 实测稳定 60fps，resize 响应正确；`cargo build -p lxlake-editor` **不编 3D**（当时 editor 连 `gpu` 档都没开，依赖图里 wgpu / naga 出现 0 次）。外部事件源 / pump 交的是**接口 + 调度**（源声明截止时间、运行时按最早者设 `WaitUntil`；跨线程唤醒走 `EventLoopProxy`），不含任何 wry / CEF 实现——webview 线的第一件事就是拿它核对 ~10ms 泵的语义。
 
 ## M1 空岛只读
 
@@ -43,8 +43,8 @@ greedy meshing）、`camera`（只吃轴值的自由飞行相机）、`render`�
 
 按包验证（**不跑 `--workspace`**）已通过：`cargo test -p lxlake --features render` 39 项全绿
 （含 render 的布局对照、光投影稳定性、图集扰动值域），`cargo clippy -p lxlake --all-features --all-targets`
-与 demo / editor 的 clippy、`cargo fmt --check` 均无告警；`cargo build -p lxlake-editor` 的依赖图里
-wgpu / naga / bytemuck 出现 **0 次**（bytemuck 随 `render` 特性分档）。剩下的是**实机看一眼**：
+与 demo / editor 的 clippy、`cargo fmt --check` 均无告警；`cargo build -p lxlake-editor`
+**不编 3D**（当时 editor 不开任何渲染档，bytemuck 也没进来）。剩下的是**实机看一眼**：
 窗口里的画面、帧率与流式进度（标题栏每秒刷新）。
 
 ### 实机第一跑踩到的三件事
@@ -78,9 +78,9 @@ wgpu / naga / bytemuck 出现 **0 次**（bytemuck 随 `render` 特性分档）�
 
 1. 飞一圈，帧时间稳定不掉
 2. 区块异步生成不阻塞主线程
-3. 关掉 `render` 后 `cargo build -p lxlake-editor` **完全不编译 wgpu**
+3. 关掉 `render` 后 `cargo build -p lxlake-editor` **完全不编译 3D**
 
-第 3 条是对「框架主线不依赖渲染」这条架构约束的第一次真实验证，比画面本身更重要。
+第 3 条是对「框架主线不依赖引擎 3D 渲染」这条架构约束的第一次真实验证，比画面本身更重要。后来的口径收成 **「不编 3D」**：`render` 特性拆成 `gpu` / `ui-render` / `render` 三档（见 [架构](architecture.md) 的「feature 分档」）后，editor 开 `ui-render`——自绘 UI 本来就要设备与方片管线，验的是「editor 的编译单元里不出现 `pipeline.rs` / `shader.wgsl` 这些 3D 产物」。正负控制两条：`cargo tree -p lxlake-editor -e features` 里没有 `render`；`cargo tree -p lxlake-demo -e features` 里有（证明查法没空转）。
 
 ### 视觉标准：像素质感纹理 + 现代光照
 
@@ -102,9 +102,8 @@ NPR 部分在 M1 只留一个 ramp 光照 / 边缘光的开关，验证「能叠
 
 验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 69 项、`--features render` 78 项全绿；
 `lxlake` / `lxlake-macros` / `lxlake-demo` / `lxlake-editor` 的 `clippy --all-targets -D warnings`
-与 `cargo fmt --check` 无告警；`cargo build -p lxlake-editor` 的依赖图里 wgpu / naga / bytemuck
-仍是 **0 次**（验收第 5 条）。剩下的是**实机看一眼**：对着地形点左键 / 右键，画面下一帧更新、
-帧时间不掉。
+与 `cargo fmt --check` 无告警；`cargo build -p lxlake-editor` **不编 3D**（验收第 5 条）。剩下的是
+**实机看一眼**：对着地形点左键 / 右键，画面下一帧更新、帧时间不掉。
 
 一行摘要见上面的表：体素碰撞 + 射线破坏/放置 + 命令流。要逼出的三样是**命令契约**、**世界可变性**、
 **输入与模拟的分界**，下面把它们各自落成具体设计。
@@ -128,7 +127,7 @@ NPR 部分在 M1 只留一个 ramp 光照 / 边缘光的开关，验证「能叠
 2. **在区块边界上改方块，接缝正确**——没有洞、没有该藏的面露出来
 3. 撞墙就停，穿不过实心方块；不加任何重力仍能自由飞
 4. 命令可序列化：能打印出「这一帧产生的命令序列」，为 M4 存档与将来的联机留口
-5. 关掉 `render` 后 editor 仍编译且依赖图里没有 wgpu（延续 M1 第 3 条）
+5. 关掉 `render` 后 editor 仍编译且不编 3D（延续 M1 第 3 条）
 
 ### 世界可变性：从「不可变快照」到「可替换快照」
 
@@ -210,8 +209,8 @@ android 不拉东西；装配面是 `Builder::webview`，摆位复用同一块 `
 
 按包验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 155 项、`--features render` 170 项、
 `--features webview-wry` 155 项、`cargo test -p lxlake-demo` 5 项全绿；`clippy --all-targets -D warnings`
-与 `cargo fmt --all --check` 无告警；`cargo build -p lxlake-editor` 的依赖图里 wgpu / naga / bytemuck
-仍是 **0 次**（排版只用普通依赖 `ab_glyph`，不受 `render` 门控；wry 同样不在 editor 的图里）。剩下的是
+与 `cargo fmt --all --check` 无告警；`cargo build -p lxlake-editor` **不编 3D**
+（排版只用普通依赖 `ab_glyph`，不受 `render` 门控；wry 同样不在 editor 的图里）。剩下的是
 **实机看一眼** HUD 与覆盖层：覆盖层在最上（Tab 面板也盖不住它）、矩形内点击不挖方块也不转视角、
 resize 与 DPI 变化后仍锚在右下角。
 
@@ -239,7 +238,7 @@ resize 与 DPI 变化后仍锚在右下角。
 1. 左上角面板显示实时 fps / 区块数 / 相机坐标，字形清晰（高 DPI 下不糊）
 2. 准星恒定在屏幕正中，窗口缩放后仍贴着中心
 3. 面板打开时键盘与视角归面板；**准星不吞点击**——面板没开时对着中心破坏 / 放置照旧生效
-4. 关掉 `render` 后 editor 仍编译，且依赖图里没有 wgpu（延续 M1 / M2）
+4. 关掉 `render` 后 editor 仍编译，且不编 3D（延续 M1 / M2）
 
 ### 出图形式只有方片
 

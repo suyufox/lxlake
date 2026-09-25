@@ -16,10 +16,10 @@ use crate::capability::webview::{OverlayId, OverlaySpec, create_overlay};
 use crate::core::Error;
 use crate::core::event::Event;
 use crate::core::geometry::PhysicalSize;
-#[cfg(feature = "render")]
+#[cfg(feature = "gpu")]
 use crate::core::window::WindowHandle;
 use crate::core::window::{WindowDesc, WindowId, WindowLabel, WindowSpec};
-#[cfg(feature = "render")]
+#[cfg(feature = "gpu")]
 use crate::render::{RenderError, Renderer};
 use crate::ui::{TextShaper, place};
 use std::any::Any;
@@ -34,7 +34,7 @@ type FrameHook = Box<dyn FnMut(&mut App, Frame)>;
 type ShutdownHook = Box<dyn FnOnce(&mut App)>;
 
 /// 渲染器工厂的存储形状：按窗口句柄建一份渲染器。
-#[cfg(feature = "render")]
+#[cfg(feature = "gpu")]
 type RendererFactory = Box<dyn Fn(Arc<dyn WindowHandle>) -> Result<Renderer, RenderError>>;
 
 /// 没配 `app_id` 时的应用标识。
@@ -78,7 +78,7 @@ pub struct Builder {
   /// 渲染器工厂：窗口建好时按它的句柄建一份。`None` = 不建渲染器。
   ///
   /// 是 `Fn` 而不是 `FnOnce`——多窗口要各建一份。
-  #[cfg(feature = "render")]
+  #[cfg(feature = "gpu")]
   renderer: Option<RendererFactory>,
   on_startup: Option<StartupHook>,
   on_event: Option<EventHook>,
@@ -109,7 +109,7 @@ impl Builder {
       log: None,
       async_config: None,
       plugins: Vec::new(),
-      #[cfg(feature = "render")]
+      #[cfg(feature = "gpu")]
       renderer: None,
       on_startup: None,
       on_event: None,
@@ -209,7 +209,7 @@ impl Builder {
   /// 渲染器工厂：**每建一个窗口**按它的句柄建一份（闭包是 `Fn`，多窗各建一份）。
   ///
   /// 建失败只报一声，该窗口不出画，应用照常跑。
-  #[cfg(feature = "render")]
+  #[cfg(feature = "gpu")]
   pub fn renderer(
     mut self,
     make: impl Fn(Arc<dyn WindowHandle>) -> Result<Renderer, RenderError> + 'static,
@@ -336,7 +336,7 @@ impl Builder {
   /// 活到进程退出之后。
   fn release_capabilities(&mut self) {
     self.app.clear_webviews();
-    #[cfg(feature = "render")]
+    #[cfg(feature = "gpu")]
     self.app.clear_gpu();
     self.app.clear_exec();
   }
@@ -348,7 +348,7 @@ impl Builder {
   fn forward_window_event(&mut self, event: &Event) {
     match event {
       Event::Resized { window, size } => {
-        #[cfg(feature = "render")]
+        #[cfg(feature = "gpu")]
         if let Some(renderer) = self.app.gpu_mut(*window) {
           renderer.resize(*size);
         }
@@ -366,7 +366,7 @@ impl Builder {
         scale_factor,
         size,
       } => {
-        #[cfg(feature = "render")]
+        #[cfg(feature = "gpu")]
         if let Some(renderer) = self.app.gpu_mut(*window) {
           renderer.set_scale_factor(*scale_factor);
           renderer.resize(*size);
@@ -379,7 +379,7 @@ impl Builder {
 
   /// 窗口刚建好：按窗惰建渲染器（没配 `renderer` 就什么都不做）。
   fn build_renderer(&mut self, id: WindowId) {
-    #[cfg(feature = "render")]
+    #[cfg(feature = "gpu")]
     {
       let Some(make) = self.renderer.as_ref() else {
         return;
@@ -392,7 +392,7 @@ impl Builder {
         Err(error) => eprintln!("lxlake: 建渲染器失败（窗口 {id:?}）：{error}"),
       }
     }
-    #[cfg(not(feature = "render"))]
+    #[cfg(not(feature = "gpu"))]
     let _ = id;
   }
 
@@ -506,7 +506,7 @@ impl Application for Builder {
   }
 
   fn on_window_destroyed(&mut self, id: WindowId) {
-    #[cfg(feature = "render")]
+    #[cfg(feature = "gpu")]
     self.app.remove_gpu(id);
     // 覆盖层是父窗口的子窗口：父窗口还没摘（见 `platform::winit` 的摘窗顺序），先把它放掉。
     self.app.remove_webviews(id);

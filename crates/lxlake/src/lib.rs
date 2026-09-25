@@ -13,7 +13,8 @@
 //! - [`camera`] —— 自由飞行相机
 //! - [`ui`] —— 自绘 UI：布局、命中测试、文本排版（纯 CPU）
 //! - [`capability`] —— 可选横切能力（webview 等）：接口常编译，重依赖关在 feature 之后
-//! - `render` —— wgpu 渲染管线，全部落在 `render` 特性之后
+//! - `render` —— wgpu 渲染，分三档 feature：`gpu`（设备 / 表面）→ `ui-render`（自绘方片管线）
+//!   → `render`（3D 管线）。模块随 `gpu` 编译，模块内的 3D 内容再按 `render` 收档
 //!
 //! `world` / `meshing` / `camera` / `ui` 是引擎侧概念，但都是**纯 CPU**（不含任何 GPU 类型），
 //! 因此不加 feature 门——feature 只用来隔离 wgpu 这类重依赖（见 `docs/architecture.md`）。
@@ -30,7 +31,7 @@ pub mod runtime;
 pub mod ui;
 pub mod world;
 
-#[cfg(feature = "render")]
+#[cfg(feature = "gpu")]
 pub mod render;
 
 /// 应用装配器：`Builder::new().window(..).manage(..).on_frame(..)`。

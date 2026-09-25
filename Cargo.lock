@@ -1537,7 +1537,6 @@ dependencies = [
  "crossbeam-deque",
  "glam",
  "lxlake-macros",
- "naga",
  "raw-window-handle",
  "tokio",
  "tracing",

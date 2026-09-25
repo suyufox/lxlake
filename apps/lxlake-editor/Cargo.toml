@@ -1,6 +1,6 @@
 [package]
 name = "lxlake-editor"
-description = "框架侧应用：不启用 render，验证「框架主线不依赖渲染」"
+description = "框架侧应用：只启用 2D UI 渲染（ui-render 档），不编 3D"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,4 +9,4 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-lxlake = { workspace = true }
+lxlake = { workspace = true, features = ["ui-render"] }

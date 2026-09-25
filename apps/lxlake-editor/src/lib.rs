@@ -1,9 +1,10 @@
 //! lxlake-editor：框架侧应用的**库**。
 //!
-//! M0 与 demo 一样只是一个空窗口——它的作用是**验证依赖图**：不启用 `render` 时，
-//! `cargo build -p lxlake-editor` 完全不编译 wgpu（见 `docs/roadmap.md` M1 验收第 3 条）。
+//! M0 与 demo 一样只是一个空窗口——它的作用是**验证依赖图**：editor 只开 `ui-render` 档，
+//! 自绘 UI 需要设备与方片管线，但**不编 3D**（`pipeline.rs` / `shader.wgsl` 不进编译单元，
+//! 见 `docs/roadmap.md` M1 验收第 3 条）。
 //!
-//! 它同时是「不带渲染也能用 Builder」的样本：只声明窗口，不碰 `render` 特性下的任何东西。
+//! 它同时是「不带 3D 也能用 Builder」的样本：只声明窗口，不碰 `render` 特性下的任何东西。
 //!
 //! 逻辑住在这里、可执行入口住在同包的 `main.rs`（它只调一行 [`run`]）——两个应用同型，
 //! Android 才能一视同仁（那边的真实入口是 `android_main`，与 `fn main` 无关）。

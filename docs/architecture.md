@@ -40,23 +40,23 @@ Vulkan 驱动一进 `adapter.request_device` 就 AV 崩掉进程；多挂一个�
 
 分层落在**模块树**上，不落在 crate 边界上。`lxlake` 内部按职责分区：
 
-| 模块         | 职责                                                           | 关键约束                                     |
-| ------------ | -------------------------------------------------------------- | -------------------------------------------- |
-| `core`       | 契约：场景、Widget、命令、事件                                 | **不出现 winit / wgpu 类型**，不依赖任何平台 |
-| `runtime`    | 事件循环、`App`、pump 钩子、任务调度                           | 帧边界与外部事件源的唯一归属                 |
-| `platform`   | 平台后端（窗口、输入、IME、文件系统）                          | 按 `cfg(target_os)` 分档，**不按 feature**   |
-| `render`     | wgpu 渲染管线、纹理导入                                        | 全部落在 `render` 特性之后                   |
-| `world`      | 体素世界：方块注册表、区块、浮岛生成、区块流式、射线与碰撞查询 | 纯 CPU，**不含 GPU 类型**；不加 feature 门   |
-| `meshing`    | 区块 → 顶点 / 索引（greedy meshing）                           | 纯 CPU，输出 POD 顶点，无 GPU 类型           |
-| `camera`     | 自由飞行相机                                                   | 只吃已映射的轴值，不认识按键与窗口事件       |
-| `ui`         | 自绘 UI：布局、文本排版、交互                                  | 自绘，不引入系统控件或 HTML 渲染             |
-| `capability` | webview / media / update 等可选横切能力                        | 逐个 feature 隔离，能力以**查询**形式暴露    |
-| `plugin`     | 插件宿主                                                       | 只留一条窄的、可版本化的 C ABI 边界          |
+| 模块         | 职责                                                           | 关键约束                                           |
+| ------------ | -------------------------------------------------------------- | -------------------------------------------------- |
+| `core`       | 契约：场景、Widget、命令、事件                                 | **不出现 winit / wgpu 类型**，不依赖任何平台       |
+| `runtime`    | 事件循环、`App`、pump 钩子、任务调度                           | 帧边界与外部事件源的唯一归属                       |
+| `platform`   | 平台后端（窗口、输入、IME、文件系统）                          | 按 `cfg(target_os)` 分档，**不按 feature**         |
+| `render`     | wgpu 渲染：设备 / 表面、自绘方片管线、3D 管线与纹理导入        | 只落在 `gpu` / `ui-render` / `render` 三档特性之下 |
+| `world`      | 体素世界：方块注册表、区块、浮岛生成、区块流式、射线与碰撞查询 | 纯 CPU，**不含 GPU 类型**；不加 feature 门         |
+| `meshing`    | 区块 → 顶点 / 索引（greedy meshing）                           | 纯 CPU，输出 POD 顶点，无 GPU 类型                 |
+| `camera`     | 自由飞行相机                                                   | 只吃已映射的轴值，不认识按键与窗口事件             |
+| `ui`         | 自绘 UI：布局、文本排版、交互                                  | 自绘，不引入系统控件或 HTML 渲染                   |
+| `capability` | webview / media / update 等可选横切能力                        | 逐个 feature 隔离，能力以**查询**形式暴露          |
+| `plugin`     | 插件宿主                                                       | 只留一条窄的、可版本化的 C ABI 边界                |
 
 feature 只用来隔离**重依赖**（wgpu / wry / cef 这类）。`world` / `meshing` / `camera` 是引擎侧
 概念，但都是纯 CPU，所以不加门——门多了会出现「框架主线不知该开哪个」的混乱。
 
-`core` 这条约束是**可机检的**：契约层一旦出现 `wgpu` 或 `winit` 类型，框架主线就再也无法在不启用渲染的情况下干净编译。
+`core` 这条约束是**可机检的**：契约层一旦出现 `wgpu` 或 `winit` 类型，框架主线就再也无法在不编 3D 的前提下干净编译。
 
 ## 分包
 
@@ -79,7 +79,7 @@ lxlake/
 │   │       └── plugin/
 │   └── lxlake-macros/         # proc-macro —— Cargo 硬约束，必须独立
 ├── apps/
-│   ├── lxlake-editor/         # 纯框架：不启用 render
+│   ├── lxlake-editor/         # 纯框架：ui-render（自绘 UI，不编 3D）
 │   └── lxlake-demo/           # 引擎：render + 空岛
 └── packages/                  # node 侧：起步空着，等真有工具再建
 ```
@@ -103,7 +103,9 @@ lxlake/
 **同 target 上的可选能力用 feature**：
 
 ```
-render      = ["dep:wgpu", "dep:naga"]
+gpu         = ["dep:wgpu"]                        # 设备 / 队列 / 表面 / 取帧
+ui-render   = ["gpu", "dep:bytemuck"]             # + 自绘方片管线与 UI 图集
+render      = ["ui-render"]                       # + 3D 管线 / 方块图集 / 深度与阴影
 webview-wry = ["dep:wry"]
 webview-cef = ["dep:cef"]
 cef-ffmpeg  = ["webview-cef", "dep:ffmpeg"]   # GPL 隔离，单独发行物
@@ -111,9 +113,11 @@ media       = ["dep:ffmpeg"]
 plugin      = ["dep:wasmtime", "dep:wit-bindgen"]
 ```
 
+渲染三档**单调递增**，按**消费者**切而不是按概念切：`gpu` 的消费者是将来 CEF 的纹理模式（要设备与取帧，不要方片管线），`ui-render` 的消费者是编辑器（要自绘 UI，不要 3D），`render` 才是引擎侧（demo）。三档下 `Renderer` 都是同一个类型，只是字段与方法按档收——`runtime` 因此只认**地板档** `gpu`，不必知道当前是哪一档。`naga` 不再显式声明：wgpu 自己传递依赖它，仓库里没有任何 `naga::` 引用。
+
 `content` 之外的依赖一律 `optional = true`，只经 feature 拉入。
 
-`winit` **不在 `render` 里**——开窗是框架主线（`runtime` + `platform`）的能力，不是渲染的。M0 的空窗口不开 `render` 也必须能跑，所以 `winit` 是基础依赖。
+`winit` **不在上面任何一档里**——开窗是框架主线（`runtime` + `platform`）的能力，不是渲染的。M0 的空窗口不开任何渲染特性也必须能跑，所以 `winit` 是基础依赖。
 
 ### feature 统一，以及为什么不靠拆 crate 解决
 
