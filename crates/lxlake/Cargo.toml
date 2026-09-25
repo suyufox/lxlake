@@ -40,6 +40,11 @@ crossbeam-deque = "0.8.8"
 # ——不加 feature 门，因为框架主线（不开 render）同样要自绘 UI 文本，而它不碰任何 GPU 类型。
 ab_glyph = "0.2"
 
+# 项目清单（M3 起）：读 `lxlake.toml`。与 ab_glyph 同档的普通依赖——开项目与打日志一样是框架
+# 主线的事，不开 render 也要读。**只在 `project` 模块用**，且不引 serde 派生（手工取字段，
+# 为了中文诊断与行列定位，见 project.rs）。
+toml = "0.8"
+
 # 日志门面：tracing 的宏不是平台类型，可以出现在 core / path。
 tracing = "0.1"
 # 订阅器与轮转 appender：**安装**发生在平台入口（见 runtime/log.rs 的数据与安装分离），

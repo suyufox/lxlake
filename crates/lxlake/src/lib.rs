@@ -8,10 +8,11 @@
 //! - [`runtime`] —— 装配（[`Builder`]）、帧循环、[`App`](runtime::App)、外部事件源泵、作业池
 //! - `platform` —— 平台后端，按 `cfg(target_os)` 分档；应用代码不该碰它，用 [`runtime::run`] 即可
 //! - [`path`] —— 系统目录与应用目录的**唯一判断处**（[`Paths`](path::Paths) + [`BaseDirectory`](path::BaseDirectory)）
+//! - [`project`] —— 项目：清单（`lxlake.toml`）+ 项目根 + 文档发现（纯 CPU）
 //! - [`world`] —— 体素世界：方块注册表、区块、浮岛生成、区块流式
 //! - [`meshing`] —— 区块 → 网格（纯 CPU，POD 顶点）
 //! - [`camera`] —— 自由飞行相机
-//! - [`ui`] —— 自绘 UI：布局、命中测试、文本排版（纯 CPU）
+//! - [`ui`] —— 自绘 UI：布局、命中测试、文本排版、文档模型与 `.lxml` 文本 IR（纯 CPU）
 //! - [`capability`] —— 可选横切能力（webview 等）：接口常编译，重依赖关在 feature 之后
 //! - `render` —— wgpu 渲染，分三档 feature：`gpu`（设备 / 表面）→ `ui-render`（自绘方片管线）
 //!   → `render`（3D 管线）。模块随 `gpu` 编译，模块内的 3D 内容再按 `render` 收档
@@ -27,6 +28,7 @@ pub mod core;
 pub mod meshing;
 pub mod path;
 mod platform;
+pub mod project;
 pub mod runtime;
 pub mod ui;
 pub mod world;

@@ -1539,6 +1539,7 @@ dependencies = [
  "lxlake-macros",
  "raw-window-handle",
  "tokio",
+ "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
