@@ -1,4 +1,4 @@
-//! 自绘 UI：布局、命中测试、文本排版、文档模型。
+//! 自绘 UI：布局、命中测试、文本排版、文档模型、`.lxml` 文本 IR。
 //!
 //! 与 [`crate::core::widget`] 的分工：契约层定「Widget 长什么样」（锚定 + 尺寸 + 是否覆盖层），
 //! 本模块定「怎么算」（摆位成矩形、命中哪一块）。**纯 CPU**——不含任何 GPU 类型，也不加
@@ -18,6 +18,7 @@ use crate::core::widget::{UiId, Widget};
 
 mod doc;
 mod draw;
+mod lxml;
 mod text;
 
 pub use doc::{
@@ -25,6 +26,7 @@ pub use doc::{
   default_of, instantiate,
 };
 pub use draw::{Quad, QuadSource};
+pub use lxml::{DiagnosticSeverity, LxmlDiagnostic, StaticNode, parse_lxml};
 pub use text::{GlyphBitmap, GlyphKey, TextError, TextShaper, TextStyle};
 
 /// 布局结果：一个 Widget 在视口里的矩形。
