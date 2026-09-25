@@ -21,7 +21,7 @@ lxlake 本质是**跨平台应用框架**，同时具备游戏引擎的能力：
 | android    | **接入已落地**：与桌面共用 winit 后端，类型检查已过；打包与真机在后 |
 | macos      | 目标，实装排后                                                      |
 | ios        | 目标，实装排后                                                      |
-| headless   | 无窗口后端，供测试与服务器使用                                      |
+| headless   | **规划中，未实装**：今天测试能跑只是因为单测不建窗口                |
 | web / wasm | **不做**                                                            |
 
 android **不另起一个后端**：winit 自己就带 android 后端（`android-game-activity` 特性），事件循环、
@@ -29,6 +29,8 @@ android **不另起一个后端**：winit 自己就带 android 后端（`android
 真正的差异只有三处，都在那一处收口——入口多一个系统递进来的 `AndroidApp`（沙箱根由它给），
 `resumed` 会反复来（切后台再回前台 = 一次新的 `InitWindow`），`suspended` 要把窗口整体摘掉
 （系统已销毁 surface）。`AndroidApp` 由 winit 再导出，因此不直接依赖 `android-activity` / `ndk` / `jni`。
+
+除这四个 target 外，`platform` 后端直接 `compile_error!`（见 `platform/mod.rs`）——所以 headless 不是「有个能跑的后端」，而是**还没有**。
 
 带 C 依赖的部分（vcpkg 清单）覆盖 windows / linux 宿主 + android 附加系；apple 平台不纳入 C 依赖清单，这不影响纯 Rust 部分的平台目标。
 
@@ -40,22 +42,25 @@ Vulkan 驱动一进 `adapter.request_device` 就 AV 崩掉进程；多挂一个�
 
 分层落在**模块树**上，不落在 crate 边界上。`lxlake` 内部按职责分区：
 
-| 模块         | 职责                                                           | 关键约束                                           |
-| ------------ | -------------------------------------------------------------- | -------------------------------------------------- |
-| `core`       | 契约：场景、Widget、命令、事件                                 | **不出现 winit / wgpu 类型**，不依赖任何平台       |
-| `runtime`    | 事件循环、`App`、pump 钩子、任务调度                           | 帧边界与外部事件源的唯一归属                       |
-| `platform`   | 平台后端（窗口、输入、IME、文件系统）                          | 按 `cfg(target_os)` 分档，**不按 feature**         |
-| `project`    | 项目：清单（`lxlake.toml`）+ 项目根 + 文档发现                 | 纯 CPU；清单是唯一入口，**不引 serde 派生**        |
-| `render`     | wgpu 渲染：设备 / 表面、自绘方片管线、3D 管线与纹理导入        | 只落在 `gpu` / `ui-render` / `render` 三档特性之下 |
-| `world`      | 体素世界：方块注册表、区块、浮岛生成、区块流式、射线与碰撞查询 | 纯 CPU，**不含 GPU 类型**；不加 feature 门         |
-| `meshing`    | 区块 → 顶点 / 索引（greedy meshing）                           | 纯 CPU，输出 POD 顶点，无 GPU 类型                 |
-| `camera`     | 自由飞行相机                                                   | 只吃已映射的轴值，不认识按键与窗口事件             |
-| `ui`         | 自绘 UI：布局、文本排版、交互                                  | 自绘，不引入系统控件或 HTML 渲染                   |
-| `capability` | webview / media / update 等可选横切能力                        | 逐个 feature 隔离，能力以**查询**形式暴露          |
-| `plugin`     | 插件宿主                                                       | 只留一条窄的、可版本化的 C ABI 边界                |
+| 模块         | 职责                                                              | 关键约束                                           |
+| ------------ | ----------------------------------------------------------------- | -------------------------------------------------- |
+| `core`       | 契约：场景、Widget、命令、事件                                    | **不出现 winit / wgpu 类型**，不依赖任何平台       |
+| `runtime`    | 事件循环、`App`、pump 钩子、任务调度                              | 帧边界与外部事件源的唯一归属                       |
+| `platform`   | 平台后端（窗口、输入、IME、文件系统）                             | 按 `cfg(target_os)` 分档，**不按 feature**         |
+| `path`       | 系统目录与应用目录的**唯一判断处**                                | 不引第三方目录库；android 走 activity 递的沙箱根   |
+| `project`    | 项目：清单（`lxlake.toml`）+ 项目根 + 文档发现                    | 纯 CPU；清单是唯一入口，**不引 serde 派生**        |
+| `render`     | wgpu 渲染：设备 / 表面、自绘方片管线、3D 管线与纹理导入           | 只落在 `gpu` / `ui-render` / `render` 三档特性之下 |
+| `world`      | 体素世界：方块注册表、区块、浮岛生成、区块流式、射线与碰撞查询    | 纯 CPU，**不含 GPU 类型**；不加 feature 门         |
+| `meshing`    | 区块 → 顶点 / 索引（greedy meshing）                              | 纯 CPU，输出 POD 顶点，无 GPU 类型                 |
+| `camera`     | 自由飞行相机                                                      | 只吃已映射的轴值，不认识按键与窗口事件             |
+| `ui`         | 自绘 UI：布局、文本排版、交互                                     | 自绘，不引入系统控件或 HTML 渲染                   |
+| `capability` | 可选横切能力；**今天只有 `webview`**（`media` / `update` 规划中） | 逐个 feature 隔离，能力以**查询**形式暴露          |
+| `plugin`     | 插件宿主——**规划中，未实装**（`src/plugin/` 还没建）              | 只留一条窄的、可版本化的 C ABI 边界                |
 
 feature 只用来隔离**重依赖**（wgpu / wry / cef 这类）。`world` / `meshing` / `camera` 是引擎侧
 概念，但都是纯 CPU，所以不加门——门多了会出现「框架主线不知该开哪个」的混乱。
+
+「能力」在两处同名的 `Capabilities` 上是**两种意思**，别读混：`runtime::Capabilities` 答的是「**这个构建**里这会儿拿得到哪些资源」（`jobs` / `text` / `gpu`，`None` = 应用没配），`capability::webview::Capabilities` 答的是「**这个平台 / 这个构建**支不支持这件事」（`overlay` / `texture` / `sandbox` / `devtools`，`false` 是正常答案而不是错误）。
 
 `core` 这条约束是**可机检的**：契约层一旦出现 `wgpu` 或 `winit` 类型，框架主线就再也无法在不编 3D 的前提下干净编译。
 
@@ -71,14 +76,15 @@ lxlake/
 │   │       ├── core/
 │   │       ├── runtime/
 │   │       ├── platform/
+│   │       ├── path.rs        # 系统目录与应用目录的唯一判断处
 │   │       ├── project.rs     # 项目：清单 + 项目根 + 文档发现
 │   │       ├── world/         # 体素世界（block / chunk / terrain / stream / raycast / collision）
 │   │       ├── meshing/
 │   │       ├── camera.rs
 │   │       ├── render/
 │   │       ├── ui/
-│   │       ├── capability/
-│   │       └── plugin/
+│   │       └── capability/
+│   │       # plugin/        —— 规划中，还没建（见上面模块表）
 │   └── lxlake-macros/         # proc-macro —— Cargo 硬约束，必须独立
 ├── apps/
 │   ├── lxlake-editor/         # 纯框架：ui-render（自绘 UI，不编 3D）
@@ -105,10 +111,13 @@ lxlake/
 **同 target 上的可选能力用 feature**：
 
 ```
+# 现状：`crates/lxlake/Cargo.toml` 里就是这四档，逐字一致
 gpu         = ["dep:wgpu"]                        # 设备 / 队列 / 表面 / 取帧
 ui-render   = ["gpu", "dep:bytemuck"]             # + 自绘方片管线与 UI 图集
 render      = ["ui-render"]                       # + 3D 管线 / 方块图集 / 深度与阴影
-webview-wry = ["dep:wry"]
+webview-wry = ["dep:wry"]                         # Windows 的 WebView2 覆盖层
+
+# 规划：**都还没实装**，Cargo.toml 里并不存在这几行，别照着开
 webview-cef = ["dep:cef"]
 cef-ffmpeg  = ["webview-cef", "dep:ffmpeg"]   # GPL 隔离，单独发行物
 media       = ["dep:ffmpeg"]
@@ -117,7 +126,9 @@ plugin      = ["dep:wasmtime", "dep:wit-bindgen"]
 
 渲染三档**单调递增**，按**消费者**切而不是按概念切：`gpu` 的消费者是将来 CEF 的纹理模式（要设备与取帧，不要方片管线），`ui-render` 的消费者是编辑器（要自绘 UI，不要 3D），`render` 才是引擎侧（demo）。三档下 `Renderer` 都是同一个类型，只是字段与方法按档收——`runtime` 因此只认**地板档** `gpu`，不必知道当前是哪一档。`naga` 不再显式声明：wgpu 自己传递依赖它，仓库里没有任何 `naga::` 引用。
 
-`content` 之外的依赖一律 `optional = true`，只经 feature 拉入。
+`webview-wry` **不挂渲染三档**——覆盖层是原生子窗口，不需要设备。四档今天都各自单独构建过（`cargo build -p lxlake --no-default-features --features <档>`）。
+
+重依赖（wgpu / wry / 将来的 cef）一律 `optional = true`，只经 feature 拉入。
 
 `winit` **不在上面任何一档里**——开窗是框架主线（`runtime` + `platform`）的能力，不是渲染的。M0 的空窗口不开任何渲染特性也必须能跑，所以 `winit` 是基础依赖。
 
@@ -145,7 +156,8 @@ plugins/               插件位：经那条窄 C ABI 加载
 - **引擎自己的分层不进动态库**。内部一律 rlib 静态链接（全量单态化 + 跨 crate LTO）；`dylib` 不用于分发
   ——它不打包 std、须随附与编译器精确匹配的 `std-<hash>`，且跨边界完全无法 LTO。Unity 的「main bin +
   一堆 dll」是 C++ 引擎预编译 + 脚本程序集的产物，不是一种可选形状。
-- **动态库只出现在两处**：`native/` 下的 C 依赖，以及 `plugins/` 的插件位。
+- **动态库只出现在两处**：`native/` 下的 C 依赖，以及 `plugins/` 的插件位——**这两处今天都还不存在**
+  （`native/` 等 CEF 那一步，`plugins/` 等上面的 `plugin` 模块）。
 
 `native/` 从 vcpkg 方向引入，因此**要随发行物出 dll 的依赖，vcpkg triplet 必须是动态档**——静态 triplet
 根本不会产生可随附的 dll。CEF 没有静态选项，必须走这条路；ffmpeg 可静可动，留到打包时再定。GPL 隔离
@@ -168,7 +180,7 @@ plugins/               插件位：经那条窄 C ABI 加载
 
 入口宏族把平台差异收在宏里：`entry` 同时产出桌面 `run()` 与 android `android_main`，两者
 **互为 `cfg` 门控**（桌面构建下 android 那段不参与解析，反之亦然），共用同一个工厂函数。
-两端都从 `Builder` 进运行时（`Builder::run` / `Builder::run_android`），插件因此在两端都生效。
+两端都从 `Builder` 进运行时（`Builder::run` / `Builder::run_android`），插件将来也在两端都生效（`plugin` 模块尚在规划）。
 
 ### 窗口身份：标签是钥匙
 
