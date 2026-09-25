@@ -49,13 +49,24 @@ impl UiTree {
   }
 
   /// 按视口尺寸算摆位。视口变化或 Widget 变动后必须重算一次，否则命中测试用的是旧矩形。
+  ///
+  /// 这是 [`UiTree::layout_in`] 的薄包装：**视口就是一个原点在 `(0, 0)` 的容器**。
   pub fn layout(&mut self, viewport: LogicalSize) {
+    self.layout_in(LogicalRect::new(0.0, 0.0, viewport.width, viewport.height));
+  }
+
+  /// 按**任意容器矩形**算摆位。
+  ///
+  /// 编辑器的预览区、将来面板内部都用它：文档节点锚进一个**算出来的**区域，于是文档里永远
+  /// 不含窗口尺寸（否则存盘会把某台机器的分辨率存进去）。摆位结果仍是绝对坐标，命中测试
+  /// 因此不需要任何坐标转换（见 [`Placed`]）。
+  pub fn layout_in(&mut self, area: LogicalRect) {
     self.placed = self
       .widgets
       .iter()
       .map(|widget| Placed {
         id: widget.id,
-        rect: place(widget, viewport),
+        rect: place_in(widget, area),
         overlay: widget.overlay,
       })
       .collect();
@@ -91,17 +102,25 @@ impl UiTree {
   }
 }
 
-/// 锚定摆位：先按九宫格归一化坐标贴到锚点，再沿屏幕方向加偏移。
+/// 锚定摆位（容器内）：先按九宫格归一化坐标贴到**容器**，再沿屏幕方向加偏移。
 ///
 /// **唯一的摆位实现**——自绘与原生覆盖层共用它：自绘把结果交给渲染，覆盖层把同一个矩形交给原生
 /// 子窗口（见 `capability::webview`）。接覆盖层时不必另写一套「覆盖层专用布局」。
-pub fn place(widget: &Widget, viewport: LogicalSize) -> LogicalRect {
+pub fn place_in(widget: &Widget, area: LogicalRect) -> LogicalRect {
   let [fx, fy] = widget.anchor.normalized();
   LogicalRect::new(
-    (viewport.width - widget.size.width) * fx + widget.offset[0],
-    (viewport.height - widget.size.height) * fy + widget.offset[1],
+    (area.width - widget.size.width) * fx + area.x + widget.offset[0],
+    (area.height - widget.size.height) * fy + area.y + widget.offset[1],
     widget.size.width,
     widget.size.height,
+  )
+}
+
+/// 摆进视口：原点在 `(0, 0)` 的容器交给 [`place_in`]。
+pub fn place(widget: &Widget, viewport: LogicalSize) -> LogicalRect {
+  place_in(
+    widget,
+    LogicalRect::new(0.0, 0.0, viewport.width, viewport.height),
   )
 }
 
@@ -232,5 +251,41 @@ mod tests {
 
     assert!(tree.placed().is_empty());
     assert_eq!(tree.hit_test(LogicalPosition::new(10.0, 10.0)), None);
+  }
+
+  /// 薄包装没走样：**视口布局 == 摆进「原点在 (0,0) 的同尺寸容器」**，逐项相等。
+  #[test]
+  fn layout_in_a_full_viewport_area_matches_layout() {
+    let mut via_layout = UiTree::new();
+    let mut via_area = UiTree::new();
+    let widgets = [
+      widget(1, Anchor::TopLeft, 100.0, 40.0),
+      widget(2, Anchor::Center, 100.0, 40.0).offset([8.0, -8.0]),
+      // 覆盖层也要一起对：这条比较的是整张 `placed`，别漏了那个标志位。
+      widget(3, Anchor::BottomRight, 100.0, 40.0).overlay(),
+    ];
+    for widget in &widgets {
+      via_layout.add(widget.clone());
+      via_area.add(widget.clone());
+    }
+
+    via_layout.layout(VIEWPORT);
+    via_area.layout_in(LogicalRect::new(0.0, 0.0, VIEWPORT.width, VIEWPORT.height));
+
+    assert_eq!(via_layout.placed(), via_area.placed());
+  }
+
+  /// 非零原点：容器里算出来的坐标整体平移，归一化比例仍按**容器**尺寸算。
+  #[test]
+  fn place_in_shifts_the_whole_container() {
+    let widget = widget(1, Anchor::Center, 100.0, 40.0);
+    let at_origin = place(&widget, VIEWPORT);
+    let inside = place_in(
+      &widget,
+      LogicalRect::new(300.0, 200.0, VIEWPORT.width, VIEWPORT.height),
+    );
+
+    assert_eq!(inside.x, at_origin.x + 300.0);
+    assert_eq!(inside.y, at_origin.y + 200.0);
   }
 }
