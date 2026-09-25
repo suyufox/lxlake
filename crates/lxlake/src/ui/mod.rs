@@ -1,8 +1,14 @@
-//! 自绘 UI：布局、命中测试、文本排版。
+//! 自绘 UI：布局、命中测试、文本排版、文档模型。
 //!
 //! 与 [`crate::core::widget`] 的分工：契约层定「Widget 长什么样」（锚定 + 尺寸 + 是否覆盖层），
 //! 本模块定「怎么算」（摆位成矩形、命中哪一块）。**纯 CPU**——不含任何 GPU 类型，也不加
 //! feature 门（见 `docs/architecture.md` 分层）。
+//!
+//! 这里有**两条上层路线**，共用同一份低层：
+//!
+//! - 引擎 HUD（`apps/lxlake-demo`）：每帧现算，Widget 的生命周期就是一帧，所以直接 `add`。
+//! - 应用 / 编辑器（`apps/lxlake-editor`）：内容来自磁盘文档，生命周期是一整个会话，
+//!   需要稳定身份与选中态——于是走 `doc.rs`（文档 → [`instantiate`] → [`UiTree`]）。
 //!
 //! 「覆盖层永远浮在最上」这条架构约定在这里就变成一条排序规则：`overlay` 的 Widget 整组排在
 //! 自绘之上，而不是按加入顺序混在一次 z 序里（见 `docs/architecture.md` 的 webview 双线）。
@@ -10,9 +16,14 @@
 use crate::core::geometry::{LogicalPosition, LogicalRect, LogicalSize};
 use crate::core::widget::{UiId, Widget};
 
+mod doc;
 mod draw;
 mod text;
 
+pub use doc::{
+  ANCHOR_NAMES, DocNode, Document, NODE_PROPS, NodeId, Prop, PropDesc, PropKind, PropValue,
+  default_of, instantiate,
+};
 pub use draw::{Quad, QuadSource};
 pub use text::{GlyphBitmap, GlyphKey, TextError, TextShaper, TextStyle};
 
