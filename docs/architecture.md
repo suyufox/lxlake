@@ -648,29 +648,38 @@ linux / macOS 那条路——它今天仍属「接口有、语义未检验」。
 
 ### 应用侧能力（框架主线）
 
-| 能力       | 现状（落点在代码里）                                                    | 缺口 / 待设计                                                                                       |
-| ---------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| 事件循环   | `runtime::run` / `run_android`、`Application`、`FrameClock`             | 「无窗口应用」表达得出来，但 **headless 后端还没有**                                                |
-| 装配面     | `Builder` 的链式口、`App::manage`、`#[lxlake::entry]`                   | 无                                                                                                  |
-| 多窗口     | `WindowRegistry` / `WindowLabel` / `WindowSpec`；渲染器与覆盖层按窗惰建 | 窗口间通信（广播 / 定向消息）还没设计                                                               |
-| 路径       | `path::{Paths, BaseDirectory}`，各平台自己解析根                        | 无                                                                                                  |
-| 日志       | `runtime::log`（`LogConfig` / `Rotation` / `FileSink`）                 | 轮转之外的保留策略（总量上限、清理）还没做                                                          |
-| 作业池     | `runtime::jobs`（`JobPool` / `JobHandle` / `JobContext`）               | 无                                                                                                  |
-| 异步运行时 | `runtime::exec`（`AsyncConfig` / `AsyncRuntime` / `Mailbox`）           | 无                                                                                                  |
-| 命令总线   | `runtime::command`（总线管序、执行器管落地）                            | **没有实体存储**：`EntityCommand` 在契约层就位却无人执行——等 `ecs`                                  |
-| 文本排版   | `ui::text`（`TextShaper` / `GlyphKey` / `GlyphBitmap`）                 | 字体族、回退链、富文本（一段里混样式）都还没有                                                      |
-| 输入       | `core::input`（`Key` / `MouseButton` / `Keymap` / `IntentState`）       | **IME 未做**（模块表写了、实装没有）；手柄与 android 触摸同理                                       |
-| 自绘 UI    | `ui`（`Widget` / `Anchor` / `UiTree` / `Quad` / `hit_test`）            | **裁剪、流式布局**；`Widget` 本身无父子，层级只在文档层                                             |
-| 文档层     | `ui::doc`（`Document` / `DocNode` / `instantiate` / `from_lxml`）       | `.lxml` **写盘**、增删节点、撤销 / 重做、文本输入                                                   |
-| 项目       | `project.rs`（`lxlake.toml` + 项目根 + 文档发现，**只读**）             | 文档目录要从顶层 `ui/` 改成 `assets/ui/`；写盘、新建项目仍无；样例项目 `data/projects/sample/` 待搬 |
-| CLI        | **未建**（`apps/lxlake-cli`）                                           | 能力的宿主：生成项目、构建打包（cook + Package）；编辑器调它，形状见「CLI 与编辑器」                |
-| webview    | `capability::webview` 接口常编译，`webview-wry` 出 Windows 覆盖层       | 纹理模式（CEF）；linux / android 的后端（今天一律 `Unsupported`）                                   |
-| 插件       | 只有进程内 `Plugin` trait 的接位（`runtime::builder`）                  | 宿主本身：`src/plugin/` **还没建**，C ABI / wasmtime 未定                                           |
-| 平台入口   | windows / linux / macos / android 四 target（`platform/mod.rs` 分档）   | **ios 后端**、headless 后端；**平台专有模块还没平铺**（今天只有 `winit.rs`）                        |
-| 通知       | **全缺**                                                                | 一层在平台专有模块（各平台原生 API），二层做 `capability::notify`（接口 + 能力查询）                |
-| 本地化     | **全缺**                                                                | `locale` 模块：文案表 + 语言回退链 + 参数插值；纯 CPU、零新依赖                                     |
-| 系统集成   | **全缺**（通知与本地化已单列，这里指其余）                              | 托盘、剪贴板、文件对话框、全局快捷键——**连文档都还没提过**                                          |
-| 横切能力   | `capability` 下只有 `webview` 一个                                      | `notify`（二层的规矩已立，代码未建）、`media` / `update`                                            |
+| 能力           | 现状（落点在代码里）                                                    | 缺口 / 待设计                                                                                                                                                                          |
+| -------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 事件循环       | `runtime::run` / `run_android`、`Application`、`FrameClock`             | 「无窗口应用」表达得出来，但 **headless 后端还没有**                                                                                                                                   |
+| 装配面         | `Builder` 的链式口、`App::manage`、`#[lxlake::entry]`                   | 无                                                                                                                                                                                     |
+| 多窗口         | `WindowRegistry` / `WindowLabel` / `WindowSpec`；渲染器与覆盖层按窗惰建 | 窗口间通信（广播 / 定向消息）还没设计                                                                                                                                                  |
+| 路径           | `path::{Paths, BaseDirectory}`，各平台自己解析根                        | **口径补细**：旧项目定了三处目录约定 + 清单**向上搜索** + `private_root` 回退，比今天细                                                                                                |
+| 配置与持久化   | **全缺**                                                                | 应用配置（点分键 TOML）、用户数据落库（旧项目 `base/config` 是 SQLite store + migrations）；键位覆盖与窗口位置都归它，与 M4 存档同源但不同库                                           |
+| 日志           | `runtime::log`（`LogConfig` / `Rotation` / `FileSink`）                 | 轮转之外的保留策略（总量上限、清理）还没做。**不是漏**：旧项目**刻意不轮转**，新项目有轮转是更全                                                                                       |
+| 作业池         | `runtime::jobs`（`JobPool` / `JobHandle` / `JobContext`）               | 无                                                                                                                                                                                     |
+| 异步运行时     | `runtime::exec`（`AsyncConfig` / `AsyncRuntime` / `Mailbox`）           | 无                                                                                                                                                                                     |
+| 归档解包       | **全缺**                                                                | zip / tar / tar.gz / tar.xz；旧项目 `base/decode` 的口径要照抄——**拒路径穿越与 symlink 逃逸、fail-closed**。update 解包与插件包都吃它                                                  |
+| 进程与环境工具 | **全缺**                                                                | 子进程调用（编辑器调 CLI 走它）、`which` / `where` 探测、运行时重定位（给 CEF 子进程找 `libcef.dll`）；旧项目 `base/utils`                                                             |
+| 原生依赖绑定   | **全缺**                                                                | `build.rs` + bindgen；**没有原生依赖时要能降级成占位**（旧项目 `base/native`），否则纯净构建会断——CEF 那条线必踩                                                                       |
+| 测试基建       | 只有常规单测（`#[cfg(test)]` + 临时目录 `Sandbox`）                     | 旧项目 `base/testkit`：`StubRenderer` / `ScriptedPlatform` / `Recorder` / `assert_steps!`——把「平台喂事件 → 断言帧步骤」变成可测；今天靠不建窗口绕开                                   |
+| 命令总线       | `runtime::command`（总线管序、执行器管落地）                            | **没有实体存储**：`EntityCommand` 在契约层就位却无人执行——等 `ecs`                                                                                                                     |
+| 文本排版       | `ui::text`（`TextShaper` / `GlyphKey` / `GlyphBitmap`）                 | 字体族、回退链、富文本（一段里混样式）都还没有。**布局策略要补细**：旧项目 `ui/text` 把布局与整形切开（`FontMetrics` trait），含贪心换行 / 对齐 / 硬断 / 行数上限                      |
+| 输入           | `core::input`（`Key` / `MouseButton` / `Keymap` / `IntentState`）       | **IME 未做**（模块表写了、实装没有）；手柄与 android 触摸同理                                                                                                                          |
+| 自绘 UI        | `ui`（`Widget` / `Anchor` / `UiTree` / `Quad` / `hit_test`）            | **裁剪、流式布局**；`Widget` 本身无父子，层级只在文档层                                                                                                                                |
+| 文档层         | `ui::doc`（`Document` / `DocNode` / `instantiate` / `from_lxml`）       | `.lxml` **写盘**、增删节点、撤销 / 重做、文本输入                                                                                                                                      |
+| 声明式 UI 入口 | **全缺**（今天只有 `.lxml` 这一条）                                     | Rust 侧要不要一个声明式入口（旧项目 `ui/macro` 的 `rsx!` / `component!`）是**未决议题**；它与已否决的 `ui/kit` reconciler / hooks / CSS 式样式**不是一回事**                           |
+| 项目           | `project.rs`（`lxlake.toml` + 项目根 + 文档发现，**只读**）             | 文档目录要从顶层 `ui/` 改成 `assets/ui/`；写盘、新建项目仍无；样例项目 `data/projects/sample/` 待搬                                                                                    |
+| CLI            | **未建**（`apps/lxlake-cli`）                                           | 能力的宿主：生成项目、构建打包（cook + Package）；编辑器调它，形状见「CLI 与编辑器」                                                                                                   |
+| 打包发行       | **全缺**（目录树形状见「发行物形状」）                                  | 三类产物（应用 / 更新 / 插件）、icon / 证书 / WiX GUID 这些**具体形状**只在旧项目 `toolchain/package` 里；装什么、怎么签还没定                                                         |
+| webview        | `capability::webview` 接口常编译，`webview-wry` 出 Windows 覆盖层       | 纹理模式（CEF）；linux / android 的后端（今天一律 `Unsupported`）                                                                                                                      |
+| 插件           | 只有进程内 `Plugin` trait 的接位（`runtime::builder`）                  | 宿主本身：`src/plugin/` **还没建**，C ABI / wasmtime 未定。**注册表要补细**：旧项目 `plugin/registry` 按 id 去重后收进 `AppBuilder::plugins`                                           |
+| 平台入口       | windows / linux / macos / android 四 target（`platform/mod.rs` 分档）   | **ios 后端**、headless 后端；**平台专有模块还没平铺**（今天只有 `winit.rs`）                                                                                                           |
+| 平台能力探测   | 查询只到 `webview` 一处（`capability`）                                 | 旧项目 `platform/*` 给 `capability() -> Option<PlatformInfo>`（`has_native_file_dialog` / `has_webview` / `dpr` / `safe_area` / `back_button`），**零 `cfg` 探针链**——这个聚合形状要补 |
+| 通知           | **全缺**                                                                | 一层在平台专有模块（各平台原生 API），二层做 `capability::notify`（接口 + 能力查询）                                                                                                   |
+| 本地化         | **全缺**                                                                | `locale` 模块：文案表 + 语言回退链 + 参数插值；纯 CPU、零新依赖                                                                                                                        |
+| 系统集成       | **全缺**（通知与本地化已单列，这里指其余）                              | 托盘、剪贴板、文件对话框、全局快捷键——**连文档都还没提过**                                                                                                                             |
+| 更新           | **全缺**                                                                | 四步链路（下载 → sha256 + 签名校验 → 解包 → **整目录改名可回滚**）旧项目 `toolchain/update` 已定；解包那一步吃「归档解包」                                                             |
+| 横切能力       | `capability` 下只有 `webview` 一个                                      | `notify`（二层的规矩已立，代码未建）、`media`（媒体解码）；**更新**已单列一行                                                                                                          |
 
 ### 引擎侧能力
 
@@ -710,6 +719,22 @@ linux / macOS 那条路——它今天仍属「接口有、语义未检验」。
 | IME                                                            | `platform` 模块表写「窗口、输入、IME、文件系统」 | 无实装、无论文；输入只有键与鼠标                                                                                                                        |
 | 系统集成（托盘 / 剪贴板 / 文件对话框 / 全局快捷键）            | **从没提过**                                     | 代码全无——属于「连规划都没写」的那一类（通知与本地化本轮已入册，见上）                                                                                  |
 
+**旧项目对出来的应用侧缺口**（本轮入册。旧项目的落点只作参考，**不搬它 34 crate 的拆法**）：
+
+| 缺口                           | 文档里的说法           | 代码事实                                                                                                        |
+| ------------------------------ | ---------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 配置与持久化                   | 本轮才补               | **全缺**；旧项目 `base/config`（点分键 TOML + SQLite store + migrations）                                       |
+| 原生依赖绑定层                 | 本轮才补               | **全缺**；旧项目 `base/native`（`build.rs` + bindgen + 无原生依赖时降级占位）——CEF 子进程找 `libcef.dll` 时必踩 |
+| 归档解包                       | 本轮才补               | **全缺**；旧项目 `base/decode`（zip / tar / tar.gz / tar.xz，fail-closed）                                      |
+| 测试基建                       | 本轮才补               | 只有常规单测；旧项目 `base/testkit`（`StubRenderer` / `ScriptedPlatform` / `Recorder` / `assert_steps!`）       |
+| 进程与环境工具                 | 本轮才补               | **全缺**；旧项目 `base/utils`（子进程 + `which` / `where` + 运行时重定位）——编辑器调 CLI 要用                   |
+| 打包发行的具体形状             | 发行物一节只定了目录树 | 三类产物 / icon / 证书 / WiX GUID 全无；旧项目 `toolchain/package` + `template` + `workspace`                   |
+| 平台能力探测（`PlatformInfo`） | 本轮才补               | `capability` 查询只到 `webview`；旧项目 `platform/*` 的 `capability()` 聚合                                     |
+| Rust 侧声明式 UI 入口          | 本轮才补               | **全缺**；旧项目 `ui/macro` 的 `rsx!` / `component!`；**未决**，且与已否决的 `ui/kit` 不是一回事                |
+
+余下五条是**口径补细**，不是「像已有其实没有」，所以不入这张表：文本布局策略、路径、更新链路、
+插件注册表、日志（旧项目刻意不轮转，新项目有轮转是更全，不是漏）。
+
 模块表里已经明确标了「规划中，未实装」的那几个（`ecs` / `item` / `entity` / `script` / `audio` /
 `locale` / `notify` / `plugin`）不在此列——**标注已经跟着走了**；这张表只收「没标注却像已有」的。
 
@@ -726,18 +751,24 @@ ecs 最简接口 ──┬─→ 实体命令执行器（WorldExecutor 的下一
 
 CLI（生成项目 / 构建打包）──→ 资产 cook ──→ {bin}_data/assets ──→ 运行时装载（异步）
 CLI ──→ 编辑器点「构建」（编辑器调 CLI，不自己实装）
+进程与环境工具 ──→ 编辑器调 CLI（走子进程）；归档解包 ──→ update 的解包一步 / 插件包
 项目结构（assets/ui 与 gen/）──→ project.rs 的 DOCUMENT_DIR 与样例项目搬位（小改，不欠别的）
 
 platform 专有模块（一层）──→ capability 各模块（二层）──→ 通知 / webview 纹理模式 / …
+   一层的探针聚合（PlatformInfo）──→ 二层的各条能力查询；聚合先于 capability 分支铺开
    CEF 那条要的专有物有两件：子进程探测（落在入口）+ 共享纹理导入（D3D12 OpenSharedHandle）
+原生依赖绑定层 ──→ CEF 子进程找得到 libcef.dll / 绑 WinRT 通知原语
 gpu 档（设备与取帧，已有）＋ 上面那件导入 ──→ CEF 纹理模式
 pump 钩子（接口有，语义未检验）········→ 只在**非 Windows** 受力（Windows 用 CEF 自己的消息循环线程）
+
+配置与持久化 ──→ 键位覆盖 / 窗口位置 / 终端用户配置（与存档同源不同库）
 
 求值目标（字节码 / AST / WIT 组件）──→ 代码语言与积木语言 ──→ 脚本插件边界 ──→ 插件宿主
 
 ui 裁剪 + 流式布局 ─┐
-locale ────────────┼─ 不依赖任何其它能力，随时可插
-IME ───────────────┘
+locale ────────────┤
+IME ───────────────┼─ 不依赖任何其它能力，随时可插
+配置 / 解包 / 进程 / 绑定 / 测试基建 / 打包形状 / 探针聚合 ─┘
 ```
 
 由此得到的先后（**只排依赖，不排工期**）：
@@ -753,7 +784,10 @@ IME ───────────────┘
 5. **先定求值目标，再定插件边界，最后才谈插件宿主**。反过来做（先挑 wasmtime、先写 C ABI）会返工：
    边界形状由 IR 与求值器决定，不由宿主运行时决定
 6. **`ui` 裁剪 / 流式布局**、**`locale`**、**IME**、**项目结构那笔小改**（`assets/ui` + 样例项目搬位）
-   不欠任何能力，随时可以插进来；编辑器那条线的「拖放组合容器」只等裁剪
+   不欠任何能力，随时可以插进来；编辑器那条线的「拖放组合容器」只等裁剪。**旧项目对出来的那几条基础库**
+   （配置与持久化 / 归档解包 / 进程与环境工具 / 原生依赖绑定 / 测试基建 / 打包形状 / 平台能力探测）
+   同样不欠别的能力——只有**原生依赖绑定**与**归档解包**分别被 CEF 与 update 拉到关键路径上。
+   平台能力探测是例外的一半：它的**形状**可以先定，但要填值得等平台专有模块平铺
 7. **CLI 与资产管线是一条独立的长线**：`lxlake-cli` 的骨架（生成项目）与 cook 谁先做看应用先需要
    什么，但**两者都要等 CLI 存在**。编辑器切片 5 的「构建打包」因此改成**调 CLI**，不自己实装
 8. 存档、音频、动画、联机是**各自独立的长线**，互不为前置；谁先做看应用先需要什么
