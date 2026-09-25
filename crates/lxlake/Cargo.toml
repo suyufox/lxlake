@@ -52,9 +52,19 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync"] }
 [features]
 default = []
 render = ["dep:wgpu", "dep:naga", "dep:bytemuck"]
+# Windows 上的 wry 覆盖层后端：`capability::webview` 的重依赖那一半，实装见
+# `capability/webview/wry.rs`。特性不开（或不在 Windows）时由同目录的 `unsupported.rs` 垫底，
+# 能力查询答「不支持」——于是没有后端也不影响框架主线编译。
+webview-wry = ["dep:wry"]
 
 # 目标分档：android 的后端（activity 生命周期、surface）由 winit 自带的 `android-game-activity`
 # 特性提供。平台后端分档一律走 `cfg(target_os)`，不用 feature（见 docs/architecture.md）——
 # 这里加的也是**依赖特性**，不是框架 feature。
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30.13", features = ["android-game-activity"] }
+
+# wry 目前只在 Windows 上有实装（WebView2）；其余平台走 `unsupported.rs` 的 fail-closed 路径，
+# 因此 Linux 不必引 webkit2gtk 那套系统依赖。这里必须是**目标专有**的可选依赖：`dep:wry` 的写法
+# 是硬要求——目标专有的可选依赖不会生成同名隐式特性。
+[target.'cfg(target_os = "windows")'.dependencies]
+wry = { version = "0.57", optional = true }

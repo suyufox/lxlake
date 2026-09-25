@@ -18,11 +18,18 @@ use crate::core::window::{WindowHandle, WindowLabel};
 use std::fmt;
 use std::sync::Arc;
 
-// 后端实装挂在私有子模块下：公开入口（[`capabilities`] / [`create_overlay`]）由本层给，读的人
-// 只需要认一个签名，不必知道后端是谁。
+// 后端只按 `cfg` 挂载：**不是**「同 target 上的可选能力」（那是 feature 的活），而是「这个构建里
+// 有没有 webview 后端」。两份实装只在 [`capabilities`] 与 `build_overlay` 上分岔，公开入口
+// [`create_overlay`] 由本层统一给——读的人只需要认一个签名。
+#[cfg(not(all(feature = "webview-wry", target_os = "windows")))]
 mod unsupported;
+#[cfg(all(feature = "webview-wry", target_os = "windows"))]
+mod wry;
 
+#[cfg(not(all(feature = "webview-wry", target_os = "windows")))]
 pub use unsupported::capabilities;
+#[cfg(all(feature = "webview-wry", target_os = "windows"))]
+pub use wry::capabilities;
 
 /// 覆盖层身份。应用自己编号，运行时只按它记账（与 `UiId` 同类）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -248,7 +255,11 @@ pub fn create_overlay(
   config: &WebViewConfig,
   rect: LogicalRect,
 ) -> Result<Box<dyn WebViewHandle>, WebViewError> {
-  unsupported::build_overlay(parent, config, rect)
+  #[cfg(all(feature = "webview-wry", target_os = "windows"))]
+  let built = wry::build_overlay(parent, config, rect);
+  #[cfg(not(all(feature = "webview-wry", target_os = "windows")))]
+  let built = unsupported::build_overlay(parent, config, rect);
+  built
 }
 
 #[cfg(test)]
