@@ -1,0 +1,9 @@
+<!-- 样例文档：编辑器打开项目时先装这一份。
+     嵌套一层就能看出结构树的缩进与预览区的父子摆位（子的容器是父的矩形）。 -->
+<panel key="window" name="窗口" anchor="center" width="560" height="320">
+  <panel key="titlebar" name="标题栏" width="560" height="40" />
+  <panel key="sidebar" name="侧栏" x="16" y="56" width="160" height="240">
+    <label key="hint" name="提示" y="16" width="140" height="24" />
+  </panel>
+  <label key="footer" name="页脚" anchor="bottom-right" width="200" height="24" />
+</panel>

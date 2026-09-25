@@ -4,8 +4,9 @@
 //! （`pipeline.rs` / `shader.wgsl` 不进编译单元，见 `docs/roadmap.md` M1 验收第 3 条）。
 //!
 //! 编辑器走**文档驱动保留模式**：唯一真相源是 [`Document`]，[`instantiate`] 出的 [`UiTree`] 只是
-//! 它这一刻的投影；选中 / 悬停这类临时状态放在文档之外（见 [`EditorState`]）。当前是第四片——
-//! 左栏结构树点选、预览区描边、右栏 Inspector 改属性 ⇒ 下一帧投影出新矩形（实时预览）。
+//! 它这一刻的投影；选中 / 悬停这类临时状态放在文档之外（见 [`EditorState`]）。左栏结构树点选、
+//! 预览区描边、右栏 Inspector 改属性 ⇒ 下一帧投影出新矩形（实时预览）；文档不由程序构造，而是
+//! **打开一个项目**、装 `entry` 那份 `.lxml`（见 [`Editor::open`]，项目见 [`lxlake::project`]）。
 //! 全程见 `.trae/documents/slice0-render-tiers-slice1-editor.md`。
 //!
 //! **三棵树**是刻意的：每块区域要摆进**不同的矩形**，而 [`UiTree::layout_in`] 一次只认一个，
@@ -16,20 +17,26 @@
 //! 逻辑住在这里、可执行入口住在同包的 `main.rs`（它只调一行 [`run`]）——两个应用同型，
 //! Android 才能一视同仁（那边的真实入口是 `android_main`，与 `fn main` 无关）。
 
+use std::path::{Path, PathBuf};
+
 use lxlake::core::event::Event;
 use lxlake::core::geometry::{LogicalPosition, LogicalRect, LogicalSize};
 use lxlake::core::input::MouseButton;
 use lxlake::core::widget::{Anchor, UiId, Widget};
 use lxlake::core::window::WindowDesc;
+use lxlake::project::Project;
 use lxlake::render::Renderer;
 use lxlake::runtime::{App, AppContext, Capabilities, Frame};
 use lxlake::ui::{
-  DocNode, Document, NODE_PROPS, NodeId, PropDesc, PropKind, PropValue, Quad, TextShaper,
-  TextStyle, UiTree, instantiate,
+  DiagnosticSeverity, DocNode, Document, LxmlDiagnostic, NODE_PROPS, NodeId, PropDesc, PropKind,
+  PropValue, Quad, TextShaper, TextStyle, UiTree, instantiate,
 };
 
 /// UI 字体（相对工作区根，发行物按工作目录读资产）。
 const UI_FONT: &str = "data/fonts/NotoSansSC-Regular.otf";
+
+/// 命令行不给项目根时打开的项目（相对工作区根，同 [`UI_FONT`]）。
+const DEFAULT_PROJECT: &str = "data/projects/sample";
 
 /// 左栏（结构树）宽度（逻辑像素）。
 const SIDEBAR_WIDTH: f64 = 240.0;
@@ -52,6 +59,9 @@ const ROW_STYLE: TextStyle = TextStyle::new(14.0, 18.0);
 /// 行内文字左内边距；以及垂直居中量（行高 28 − 行盒 18，上下各 5）。
 const ROW_TEXT_INSET: f64 = 10.0;
 const ROW_TEXT_TOP: f64 = 5.0;
+
+/// 每一层缩进多少（结构树靠它看出父子关系，见 `row_text_x`）。
+const ROW_INDENT: f64 = 14.0;
 
 /// Inspector 里标签列的宽度：值从这条线往右写。
 const LABEL_WIDTH: f64 = 76.0;
@@ -94,6 +104,8 @@ const PANEL_COLOR: [u8; 4] = [26, 28, 34, 255];
 const PREVIEW_COLOR: [u8; 4] = [18, 20, 24, 255];
 const NODE_COLOR: [u8; 4] = [46, 50, 62, 255];
 const STROKE_COLOR: [u8; 4] = [120, 190, 255, 255];
+/// 预览区里那条提示（打不开项目 / 文档有诊断）的文字颜色。暖色——与节点、描边都不撞。
+const NOTICE_COLOR: [u8; 4] = [235, 176, 120, 255];
 
 /// Inspector 控件上的动作。第一刀只要这三种（见 `PropKind`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +172,9 @@ struct EditorState {
 struct Editor {
   /// **唯一真相源**。
   document: Document,
+  /// 打开项目时出的问题，或文档带回来的第一条诊断。**画在预览区**——编辑器没有控制台，
+  /// 静默失败最难受（见 `push_text`）。
+  notice: Option<String>,
   /// 左栏结构树的树。每帧重建。
   chrome: UiTree,
   /// 右栏 Inspector 的控件。每帧重建。
@@ -174,16 +189,33 @@ struct Editor {
   quads: Vec<Quad>,
 }
 
-impl Default for Editor {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
 impl Editor {
-  fn new() -> Self {
+  /// 打开一个项目：读清单、装 `entry` 那份文档。
+  ///
+  /// **打不开不 panic**：错误文案存进 `notice`，预览区把它画出来。文档因此是空的——于是结构树没有
+  /// 行、Inspector 没有控件，画面上一眼能看出「这个根不是项目」。
+  fn open(root: impl AsRef<Path>) -> Self {
+    match Self::read(root.as_ref()) {
+      Ok((document, diagnostics)) => {
+        Self::with_document(document, diagnostics_notice(&diagnostics))
+      }
+      Err(message) => Self::with_document(Document::new(), Some(message)),
+    }
+  }
+
+  /// 读项目并装 `entry` 那份文档；失败时返回**能直接展示**的文案（[`ProjectError`] 的 Display）。
+  fn read(root: &Path) -> Result<(Document, Vec<LxmlDiagnostic>), String> {
+    let project = Project::open(root).map_err(|error| error.to_string())?;
+    project
+      .load(project.entry())
+      .map_err(|error| error.to_string())
+  }
+
+  /// 从一份已经装好的文档起家。测试用它（不碰文件系统）；[`Editor::open`] 也走这条。
+  fn with_document(document: Document, notice: Option<String>) -> Self {
     Self {
-      document: sample_document(),
+      document,
+      notice,
       chrome: UiTree::new(),
       inspector: UiTree::new(),
       preview: UiTree::new(),
@@ -254,9 +286,8 @@ impl Editor {
   fn node_of(&self, id: UiId) -> Option<NodeId> {
     self
       .document
-      .nodes()
-      .iter()
-      .map(DocNode::id)
+      .walk()
+      .map(|(_, node)| node.id())
       .find(|node_id| node_id.ui_id() == id || row_id(*node_id) == id)
   }
 
@@ -293,10 +324,11 @@ impl Editor {
     // 预览：文档投影进**算出来的**预览区。文档里因此永远不含窗口尺寸（见 `ui::doc`）。
     self.preview = instantiate(&self.document, preview_area(viewport));
 
-    // 左栏结构树：一行一个节点，行 id 由节点身份派生（跨帧稳定，选中态才比得上）。
+    // 左栏结构树：一行一个节点，**前序展开**（子紧跟在父之后，缩进即深度），行 id 由节点身份
+    // 派生（跨帧稳定，选中态才比得上）。
     self.chrome.clear();
     let rows = visible_rows(viewport.height);
-    for (index, node) in self.document.nodes().iter().take(rows).enumerate() {
+    for (index, (_, node)) in self.document.walk().take(rows).enumerate() {
       self.chrome.add(
         Widget::new(
           row_id(node.id()),
@@ -356,7 +388,7 @@ impl Editor {
       SIDEBAR_COLOR,
     ));
 
-    for node in self.document.nodes() {
+    for (_, node) in self.document.walk() {
       // 装不下的行不在树里（见 `visible_rows`），也就不该出图。
       let Some(rect) = self.chrome.rect_of(row_id(node.id())) else {
         continue;
@@ -395,7 +427,7 @@ impl Editor {
       .push(Quad::solid(preview_area(viewport), PREVIEW_COLOR));
 
     // 节点底色：文档里「有什么」要看得见，才有对象可选。
-    for node in self.document.nodes() {
+    for (_, node) in self.document.walk() {
       if let Some(rect) = self.preview.rect_of(node.id().ui_id()) {
         self.quads.push(Quad::solid(rect, NODE_COLOR));
       }
@@ -414,9 +446,9 @@ impl Editor {
     Some(stroke_quads(rect))
   }
 
-  /// 全部文字：左栏每行一行字、右栏表头与逐条标签 / 值 / 按钮上的字。
+  /// 全部文字：左栏每行一行字、右栏表头与逐条标签 / 值 / 按钮上的字、预览区那条提示。
   fn push_text(&mut self, shaper: &mut TextShaper, scale_factor: f64, viewport: LogicalSize) {
-    for node in self.document.nodes() {
+    for (depth, node) in self.document.walk() {
       let Some(rect) = self.chrome.rect_of(row_id(node.id())) else {
         continue;
       };
@@ -424,8 +456,20 @@ impl Editor {
       self.quads.extend(shaper.layout(
         &label,
         ROW_STYLE,
-        LogicalPosition::new(rect.x + ROW_TEXT_INSET, rect.y + ROW_TEXT_TOP),
+        LogicalPosition::new(row_text_x(rect.x, depth), rect.y + ROW_TEXT_TOP),
         ROW_TEXT_COLOR,
+        scale_factor,
+      ));
+    }
+
+    // 提示先于 Inspector 出画：没选中时下面会早退，而它不依赖选中。
+    if let Some(notice) = &self.notice {
+      let area = preview_area(viewport);
+      self.quads.extend(shaper.layout(
+        notice,
+        ROW_STYLE,
+        LogicalPosition::new(area.x + PANEL_PADDING, area.y + PANEL_PADDING),
+        NOTICE_COLOR,
         scale_factor,
       ));
     }
@@ -568,6 +612,14 @@ fn row_id(id: NodeId) -> UiId {
   UiId(id.ui_id().0 ^ ROW_ID_BIT)
 }
 
+/// 结构树一行文字的 x：缩进 = 深度 × [`ROW_INDENT`]。
+///
+/// 层级在结构树上**只靠缩进表达**（`Widget` 还没有裁剪与折叠，画树线更没有原语）。缩进是纯算术，
+/// 所以抽出来可以直接断言（见 tests）——不必为了看清它去凑一个排版器。
+fn row_text_x(rect_x: f64, depth: usize) -> f64 {
+  rect_x + ROW_TEXT_INSET + depth as f64 * ROW_INDENT
+}
+
 /// Inspector 控件的 `UiId`：`属性序号 << 4 | 动作编码`。
 ///
 /// 控件住在自己的树里（`Editor::inspector`），所以这个 id 空间与行 id、预览 id 天然分开，
@@ -690,36 +742,38 @@ fn stroke_quads(rect: LogicalRect) -> [Quad; 4] {
   ]
 }
 
-/// 第一刀的样例文档：**程序构造**（`.lxml` 的读写是片 5 之后的一刀，见计划文件）。
+/// 解析 / 映射诊断 → 一条能给用户看的提示；没有诊断就是 `None`。
 ///
-/// 三个节点：正中一块大面板、左上与右下各一块小面板。前两块给了 `key`——身份与位置无关，
-/// 将来在它们前面插兄弟也不会让选中跳到别的节点上（见 `ui::doc` 的 [`NodeId`]）。
-fn sample_document() -> Document {
-  let mut document = Document::new();
-  let center = document.push("panel", Some("center"));
-  let corner = document.push("panel", Some("corner"));
-  let footer = document.push("label", None);
+/// 只报**第一条**（附总数）：编辑器现在没有诊断列表，而「有没有问题、第一条是什么」已经足够让人
+/// 知道该往哪看。`ui::from_lxml` 的约定是不静默丢弃，这里把它显出来。
+fn diagnostics_notice(diagnostics: &[LxmlDiagnostic]) -> Option<String> {
+  let first = diagnostics.first()?;
+  let severity = match first.severity {
+    DiagnosticSeverity::Error => "错误",
+    DiagnosticSeverity::Warning => "警告",
+    DiagnosticSeverity::Hint => "提示",
+  };
+  // 语义阶段的诊断没有源位置（`line == 0`），那就不写「第几行」。
+  let at = if first.line > 0 {
+    format!("第 {} 行：", first.line)
+  } else {
+    String::new()
+  };
+  let more = if diagnostics.len() > 1 {
+    format!("（共 {} 条）", diagnostics.len())
+  } else {
+    String::new()
+  };
+  Some(format!("{severity}：{at}{}{more}", first.message))
+}
 
-  // 属性逐条写：`set` 就是 Inspector 走的那条路径（见 `Editor::apply_control`）。
-  for (id, key, value) in [
-    (center, "name", PropValue::Text("中央面板".to_owned())),
-    (center, "anchor", PropValue::Variant(4)), // center
-    (center, "width", PropValue::Number(320.0)),
-    (center, "height", PropValue::Number(160.0)),
-    (corner, "name", PropValue::Text("左上角".to_owned())),
-    (corner, "x", PropValue::Number(32.0)),
-    (corner, "y", PropValue::Number(32.0)),
-    (corner, "width", PropValue::Number(160.0)),
-    (corner, "height", PropValue::Number(96.0)),
-    (footer, "name", PropValue::Text("页脚".to_owned())),
-    (footer, "anchor", PropValue::Variant(8)), // bottom-right
-    (footer, "width", PropValue::Number(200.0)),
-  ] {
-    if let Some(node) = document.node_mut(id) {
-      node.set(key, value);
-    }
-  }
-  document
+/// 要打开的项目根：命令行第一个参数；不给就用仓库里的样例项目。
+///
+/// 相对工作目录读资产，与 [`UI_FONT`] 同口径（发行物按工作目录读）。
+fn project_root() -> PathBuf {
+  std::env::args_os()
+    .nth(1)
+    .map_or_else(|| PathBuf::from(DEFAULT_PROJECT), PathBuf::from)
 }
 
 /// 生命周期：装配层（[`lxlake::Builder`]）把钩子交给下面这几个自由函数，每个钩子从托管状态里
@@ -736,6 +790,9 @@ fn on_frame(app: &mut App, _frame: Frame) {
 /// 应用装配：`#[lxlake::entry]` 标在工厂函数上，宏据此产出桌面 `run()` 与 Android
 /// `android_main`——两端共用这一份装配。
 ///
+/// **项目根在这里定**（命令行参数，见 [`project_root`]）：打开项目要读文件，而读文件的结果是
+/// 一份状态，不是每帧都要重做的事。
+///
 /// `renderer` 这里是**一参数**那一支（`ui-render` 档的 [`Renderer::new`]）：编辑器没有 3D，
 /// 也就没有图集要传。
 #[lxlake::entry]
@@ -749,7 +806,7 @@ fn app() -> lxlake::Builder {
     })
     .font_path(UI_FONT)
     .renderer(Renderer::new)
-    .manage(Editor::new())
+    .manage(Editor::open(project_root()))
     .on_event(on_event)
     .on_frame(on_frame)
 }
@@ -760,6 +817,89 @@ mod tests {
 
   /// 视口够大：样例文档的每一行都装得下，两翼与预览区也各有一块地方。
   const VIEWPORT: LogicalSize = LogicalSize::new(1280.0, 720.0);
+
+  /// 一个从**内存文档**起家的编辑器。不碰文件系统：真实文档来自项目的 `.lxml`（见
+  /// [`Editor::open`]），那一路由下面几条按沙盒单独测。
+  fn editor() -> Editor {
+    Editor::with_document(sample_document(), None)
+  }
+
+  /// 编辑器的样例文档：**程序构造**，两层三节点。
+  ///
+  /// 正中一块大面板（`center`），它里面贴左上角一块小面板（`corner`），根级还有一个右下角的页脚
+  /// （无 `key`，身份按位置派生）。前两块给了 `key`——身份与位置无关，将来在它们前面插兄弟也不会
+  /// 让选中跳到别的节点上（见 `ui::doc` 的 [`NodeId`]）。
+  ///
+  /// `walk` 顺序因此是 `[(0, center), (1, corner), (0, footer)]`：**第 1 行是第 0 行的孩子**，
+  /// 所以结构树的缩进与父子摆位都有东西可测。
+  fn sample_document() -> Document {
+    let mut document = Document::new();
+    let center = document.push("panel", Some("center"));
+    let corner = document
+      .push_child(center, "panel", Some("corner"))
+      .expect("父刚加进去");
+    let footer = document.push("label", None);
+
+    // 属性逐条写：`set` 就是 Inspector 走的那条路径（见 `Editor::apply_control`）。
+    for (id, key, value) in [
+      (center, "name", PropValue::Text("中央面板".to_owned())),
+      (center, "anchor", PropValue::Variant(4)), // center
+      (center, "width", PropValue::Number(320.0)),
+      (center, "height", PropValue::Number(160.0)),
+      (corner, "name", PropValue::Text("左上角".to_owned())),
+      (corner, "x", PropValue::Number(32.0)),
+      (corner, "y", PropValue::Number(32.0)),
+      (corner, "width", PropValue::Number(160.0)),
+      (corner, "height", PropValue::Number(96.0)),
+      (footer, "name", PropValue::Text("页脚".to_owned())),
+      (footer, "anchor", PropValue::Variant(8)), // bottom-right
+      (footer, "width", PropValue::Number(200.0)),
+    ] {
+      if let Some(node) = document.node_mut(id) {
+        node.set(key, value);
+      }
+    }
+    document
+  }
+
+  /// 结构树第 `row` 行（0 起）那个节点的身份。
+  fn row_node(editor: &Editor, row: usize) -> NodeId {
+    editor
+      .document
+      .walk()
+      .nth(row)
+      .unwrap_or_else(|| panic!("第 {row} 行该有节点"))
+      .1
+      .id()
+  }
+
+  /// 一个临时项目目录：写完自己删（同 `lxlake::project` 的测试沙箱）。
+  struct Sandbox(PathBuf);
+
+  impl Sandbox {
+    fn new(name: &str) -> Sandbox {
+      let dir =
+        std::env::temp_dir().join(format!("lxlake-editor-test-{name}-{}", std::process::id()));
+      let _ = std::fs::remove_dir_all(&dir);
+      std::fs::create_dir_all(&dir).expect("沙盒该建得出来");
+      Sandbox(dir)
+    }
+
+    /// 写一个文件（必要的父目录一起建）。
+    fn write(&self, relative: &str, contents: &str) {
+      let path = self.0.join(relative);
+      if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("父目录该建得出来");
+      }
+      std::fs::write(&path, contents).expect("文件该写得进去");
+    }
+  }
+
+  impl Drop for Sandbox {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
 
   impl Editor {
     /// 某个控件中心的坐标。控件在 `relayout` 之后才有矩形。**只在测试里用**。
@@ -781,7 +921,7 @@ mod tests {
       self.click();
       assert_eq!(
         self.state.selected,
-        Some(self.document.nodes()[row].id()),
+        Some(row_node(self, row)),
         "第 {row} 行该选中第 {row} 个节点"
       );
       self.relayout(VIEWPORT);
@@ -808,10 +948,10 @@ mod tests {
   /// （不另算一遍坐标，直接拿预览树里那份比——两边要是各算各的，这条就白测了）。
   #[test]
   fn clicking_the_second_row_selects_the_second_node() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.select_row(1);
 
-    let second = editor.document.nodes()[1].id();
+    let second = row_node(&editor, 1);
     let rect = editor
       .preview
       .rect_of(second.ui_id())
@@ -822,10 +962,10 @@ mod tests {
   /// 点预览区里的方块选中的是同一个节点。
   #[test]
   fn clicking_a_node_in_the_preview_selects_it_too() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.relayout(VIEWPORT);
 
-    let corner = editor.document.nodes()[1].id();
+    let corner = row_node(&editor, 1);
     let rect = editor
       .preview
       .rect_of(corner.ui_id())
@@ -859,9 +999,9 @@ mod tests {
   /// 点空白处不动选中态。
   #[test]
   fn clicking_empty_space_keeps_the_selection() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.select_row(0);
-    let first = editor.document.nodes()[0].id();
+    let first = row_node(&editor, 0);
 
     // 左栏里、行下方的空白：三棵树都没这块。
     editor.cursor = LogicalPosition::new(SIDEBAR_WIDTH / 2.0, VIEWPORT.height - 1.0);
@@ -872,7 +1012,7 @@ mod tests {
   /// 还没点过就没有描边，右栏也没有控件。
   #[test]
   fn nothing_is_stroked_before_a_selection() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.relayout(VIEWPORT);
 
     assert_eq!(editor.state.selected, None);
@@ -886,12 +1026,12 @@ mod tests {
   /// 装不下的行**不进树**：`Widget` 没有裁剪，多摆的行会画到面板外。
   #[test]
   fn rows_that_do_not_fit_stay_out_of_the_tree() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     // 只够两行半。
     editor.relayout(LogicalSize::new(1280.0, ROW_HEIGHT * 2.5));
 
-    assert_eq!(editor.document.nodes().len(), 3, "样例文档是 3 个节点");
-    for (index, node) in editor.document.nodes().iter().enumerate() {
+    assert_eq!(editor.document.len(), 3, "样例文档是 3 个节点（含后代）");
+    for (index, (_, node)) in editor.document.walk().enumerate() {
       let placed = editor.chrome.rect_of(row_id(node.id())).is_some();
       assert_eq!(placed, index < 2, "第 {index} 行该不该在树里");
     }
@@ -900,10 +1040,10 @@ mod tests {
   /// 悬停只认结构树：预览区的节点不让左栏某一行亮起来。
   #[test]
   fn hovering_marks_the_row_under_the_cursor() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.cursor = row_center(2);
     editor.relayout(VIEWPORT);
-    assert_eq!(editor.state.hovered, Some(editor.document.nodes()[2].id()));
+    assert_eq!(editor.state.hovered, Some(row_node(&editor, 2)));
 
     editor.cursor = LogicalPosition::new(SIDEBAR_WIDTH / 2.0, VIEWPORT.height - 1.0);
     editor.relayout(VIEWPORT);
@@ -913,10 +1053,10 @@ mod tests {
   /// 行 id 与节点 id 是两套，都反查得回同一个节点。
   #[test]
   fn both_ids_reverse_lookup_the_same_node() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.relayout(VIEWPORT);
 
-    for node in editor.document.nodes() {
+    for (_, node) in editor.document.walk() {
       assert_ne!(row_id(node.id()), node.id().ui_id(), "两套 id 不重合");
       assert_eq!(editor.node_of(row_id(node.id())), Some(node.id()));
       assert_eq!(editor.node_of(node.id().ui_id()), Some(node.id()));
@@ -926,10 +1066,10 @@ mod tests {
   /// 点 `+step` → **文档里的值**变了一步，且下一帧预览矩形跟着动（实时预览的闭环）。
   #[test]
   fn stepping_a_number_moves_the_node() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.select_row(0);
 
-    let node = editor.document.nodes()[0].id();
+    let node = row_node(&editor, 0);
     let width = prop_index("width");
     let before_value = editor.document.node_by_id(node).unwrap().number("width");
     let before_rect = editor.preview.rect_of(node.ui_id()).unwrap();
@@ -952,10 +1092,10 @@ mod tests {
   /// 步进被 `min` / `max` 夹住，不会跑出属性表写的范围。
   #[test]
   fn stepping_stops_at_the_bounds() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.select_row(0);
 
-    let node = editor.document.nodes()[0].id();
+    let node = row_node(&editor, 0);
     let width = prop_index("width");
     // 一路往左点到夹住为止（200 步 × 8 远超过 320）。
     for _ in 0..200 {
@@ -973,10 +1113,10 @@ mod tests {
   /// 枚举按钮「走到下一个」，走到表尾绕回表头。
   #[test]
   fn the_enum_button_cycles_through_candidates() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.select_row(0);
 
-    let node = editor.document.nodes()[0].id();
+    let node = row_node(&editor, 0);
     let anchor = prop_index("anchor");
     // 样例里 anchor = 4（center），九个候选走一圈回到原处。
     for expected in [5, 6, 7, 8, 0, 1, 2, 3, 4] {
@@ -992,7 +1132,7 @@ mod tests {
   /// 文本属性第一刀只读：树上没有它的控件。
   #[test]
   fn a_text_prop_has_no_control() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.select_row(0);
 
     let name = prop_index("name");
@@ -1021,7 +1161,7 @@ mod tests {
   /// 点 Inspector 上的控件不改选中态。
   #[test]
   fn pressing_a_control_keeps_the_selection() {
-    let mut editor = Editor::new();
+    let mut editor = editor();
     editor.select_row(0);
     let selected = editor.state.selected;
 
@@ -1029,5 +1169,114 @@ mod tests {
     editor.click();
 
     assert_eq!(editor.state.selected, selected);
+  }
+
+  /// 打开一个项目：`entry` 那份 `.lxml` 装成文档，结构树按**前序**出行（子紧跟在父之后）。
+  #[test]
+  fn opening_a_project_loads_its_entry_document() {
+    let sandbox = Sandbox::new("open");
+    sandbox.write("lxlake.toml", "name = \"样例\"\nentry = \"ui/main.lxml\"\n");
+    sandbox.write(
+      "ui/main.lxml",
+      "<panel key=\"window\" width=\"400\" height=\"200\"><label key=\"hint\" /></panel>",
+    );
+
+    let mut editor = Editor::open(&sandbox.0);
+
+    assert_eq!(editor.notice, None, "这份项目与文档都干净");
+    assert_eq!(editor.document.len(), 2);
+    assert_eq!(
+      editor
+        .document
+        .walk()
+        .map(|(depth, _)| depth)
+        .collect::<Vec<_>>(),
+      [0, 1],
+      "子紧跟在父之后"
+    );
+
+    // 两行都进树（缩进的那个也一样）。
+    editor.relayout(VIEWPORT);
+    for (_, node) in editor.document.walk() {
+      assert!(
+        editor.chrome.rect_of(row_id(node.id())).is_some(),
+        "每个节点各占一行"
+      );
+    }
+  }
+
+  /// 打不开的项目**不 panic**：文档是空的、文案进 `notice`，结构树与预览区都不该有东西。
+  #[test]
+  fn a_root_that_is_not_a_project_shows_the_error_instead_of_a_document() {
+    let sandbox = Sandbox::new("not-a-project");
+    sandbox.write("ui/main.lxml", "<panel />");
+
+    let mut editor = Editor::open(&sandbox.0);
+
+    let notice = editor.notice.as_deref().expect("该有一条提示");
+    assert!(notice.contains("lxlake.toml"), "{notice}");
+    assert!(editor.document.is_empty());
+
+    editor.relayout(VIEWPORT);
+    assert!(editor.chrome.placed().is_empty(), "没有节点就没有行");
+    assert!(editor.preview.placed().is_empty(), "预览区也不该有方块");
+  }
+
+  /// 文档带回来的诊断不静默丢弃：第一条进 `notice`（这里是一条未知属性的警告）。
+  #[test]
+  fn the_first_diagnostic_becomes_a_notice() {
+    let sandbox = Sandbox::new("diagnostics");
+    sandbox.write("lxlake.toml", "name = \"样例\"\nentry = \"ui/main.lxml\"\n");
+    sandbox.write("ui/main.lxml", "<panel color=\"1,0,0\" />");
+
+    let editor = Editor::open(&sandbox.0);
+
+    let notice = editor.notice.as_deref().expect("未知属性该出一条提示");
+    assert!(notice.contains("警告"), "{notice}");
+    assert!(notice.contains("color"), "{notice}");
+    assert_eq!(editor.document.len(), 1, "报归报，节点照样装进来");
+  }
+
+  /// 结构树第 1 行是第 0 行的**孩子**：预览区里它也就落在父的矩形内（子的容器是父的矩形）。
+  #[test]
+  fn the_second_row_is_the_first_rows_child_in_the_preview_too() {
+    let mut editor = editor();
+    editor.relayout(VIEWPORT);
+
+    let parent_rect = editor
+      .preview
+      .rect_of(row_node(&editor, 0).ui_id())
+      .expect("父在预览树里");
+    let child_rect = editor
+      .preview
+      .rect_of(row_node(&editor, 1).ui_id())
+      .expect("子在预览树里");
+
+    assert!(
+      child_rect.x >= parent_rect.x && child_rect.y >= parent_rect.y,
+      "子该从父的左上角往内挪：{child_rect:?} vs {parent_rect:?}"
+    );
+    assert!(
+      child_rect.x + child_rect.width <= parent_rect.x + parent_rect.width
+        && child_rect.y + child_rect.height <= parent_rect.y + parent_rect.height,
+      "子该整个落在父的矩形内：{child_rect:?} vs {parent_rect:?}"
+    );
+  }
+
+  /// 结构树靠缩进表达层级：深一层往右挪一个 [`ROW_INDENT`]。
+  #[test]
+  fn deeper_rows_are_indented_further() {
+    let root = row_text_x(0.0, 0);
+    let child = row_text_x(0.0, 1);
+    let grandchild = row_text_x(0.0, 2);
+
+    assert_eq!(root, ROW_TEXT_INSET, "根级还是原来那个内边距");
+    assert_eq!(child - root, ROW_INDENT);
+    assert_eq!(grandchild - child, ROW_INDENT);
+    // 行矩形带 x 时缩进是叠加的（行永远从面板左边起）。
+    assert_eq!(
+      row_text_x(SIDEBAR_WIDTH, 1),
+      SIDEBAR_WIDTH + ROW_TEXT_INSET + ROW_INDENT
+    );
   }
 }
