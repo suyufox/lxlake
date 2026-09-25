@@ -11,6 +11,9 @@
 //!
 //! M3 收尾再加上**原生覆盖层**：窗口右下角一块 wry（WebView2）子窗口，矩形与自绘共用同一份
 //! 摆位数据（见 [`overlay_widget`]）——覆盖层永远浮在画面与自绘 UI 之上，不参与 z 序与裁剪。
+//! 原生子窗口没法从页面里关掉自己（页面 → 宿主那条线还没铺），所以隐藏的口子留在自绘这一侧：
+//! 面板开着时信息面板下方多出一个按钮（此时光标才可见、可点，见 [`ui_owns_click`]），
+//! 点一下藏起来、再点一下显回来（见 [`overlay_button_lines`]）。
 //!
 //! 键位是一张**键位表**（数据，不是散落的 `match`），链路见 `docs/roadmap.md` 的
 //! 「输入与模拟的分界」：
@@ -28,7 +31,7 @@ use lxlake::core::event::Event;
 use lxlake::core::geometry::{LogicalPosition, LogicalSize};
 use lxlake::core::input::{InputSource, IntentState, Key, Keymap, MouseButton};
 use lxlake::core::widget::{Anchor, UiId, Widget};
-use lxlake::core::window::WindowDesc;
+use lxlake::core::window::{WindowDesc, WindowLabel};
 use lxlake::render::Renderer;
 use lxlake::runtime::{App, AppContext, Capabilities, CommandBus, Frame};
 use lxlake::ui::{Quad, TextShaper, TextStyle, UiTree};
@@ -102,6 +105,11 @@ const HUD_CROSSHAIR_V_ID: UiId = UiId(3);
 const HUD_HELP_ID: UiId = UiId(4);
 /// 覆盖层那块矩形在 `UiTree` 里的身份（它本身是原生子窗口，进树只为命中测试）。
 const HUD_OVERLAY_ID: UiId = UiId(5);
+/// 覆盖层开关按钮在 `UiTree` 里的身份。只在面板开着时进树——那时光标才可见、可点。
+const HUD_OVERLAY_BUTTON_ID: UiId = UiId(6);
+
+/// 开关按钮到信息面板底边的间距（逻辑像素）。
+const HUD_GAP: f64 = 8.0;
 
 /// 覆盖层的运行期身份：`OverlayId` 与 `UiId` 分开，因为前者是运行时的记账键、后者是布局的键。
 const OVERLAY_ID: OverlayId = OverlayId(1);
@@ -192,6 +200,9 @@ struct Demo {
   cursor: LogicalPosition,
   /// 调试面板是否打开。面板是**模态**的：开着时键盘与视角都归它。
   panel_open: bool,
+  /// 覆盖层是否显示。这里只存**状态**，原生子窗口的可见性由 `on_event` 依它同步
+  /// （`set_visible`——句柄留着，藏起来还能再显回来）。
+  overlay_visible: bool,
   /// 平滑后的帧率。
   fps: f32,
   frames: u32,
@@ -247,6 +258,7 @@ impl Demo {
       tree: UiTree::new(),
       cursor: LogicalPosition::new(0.0, 0.0),
       panel_open: false,
+      overlay_visible: true,
       fps: 0.0,
       frames: 0,
       last_report: Duration::ZERO,
@@ -364,14 +376,11 @@ impl Demo {
       Anchor::Center,
       LogicalSize::new(CROSSHAIR_THICKNESS, CROSSHAIR_ARM * 2.0),
     ));
-    self.tree.add(
-      Widget::new(
-        HUD_PANEL_ID,
-        Anchor::TopLeft,
-        panel_size(shaper, &info, scale_factor),
-      )
-      .offset(HUD_MARGIN),
-    );
+    let info_size = panel_size(shaper, &info, scale_factor);
+    self
+      .tree
+      .add(Widget::new(HUD_PANEL_ID, Anchor::TopLeft, info_size).offset(HUD_MARGIN));
+    let mut button_lines = Vec::new();
     if self.panel_open {
       // 帮助面板摆正中：既在视觉上是「模态」，也顺手盖住准星。
       self.tree.add(Widget::new(
@@ -379,10 +388,26 @@ impl Demo {
         Anchor::Center,
         panel_size(shaper, &help, scale_factor),
       ));
+      // 覆盖层的开关：一块自绘方片 + 一行字，摆在信息面板正下方。只在面板开着时进树——面板是
+      // 模态的，光标那时才可见、可点（见 `ui_owns_click`）。
+      let button = overlay_button_lines(self.overlay_visible);
+      self.tree.add(
+        Widget::new(
+          HUD_OVERLAY_BUTTON_ID,
+          Anchor::TopLeft,
+          panel_size(shaper, &button, scale_factor),
+        )
+        .offset([HUD_MARGIN[0], HUD_MARGIN[1] + info_size.height + HUD_GAP]),
+      );
+      // 出图放在后面（保持借用顺序），这里只把行留着。
+      button_lines = button;
     }
-    // 覆盖层那块矩形也要进树：它是原生子窗口（永远在最上），进树是为了**命中测试**把这块矩形
-    // 整组判给覆盖层。不必为它出图——自绘画在那儿也会被原生子窗口盖住。
-    self.tree.add(overlay_widget());
+    if self.overlay_visible {
+      // 覆盖层那块矩形也要进树：它是原生子窗口（永远在最上），进树是为了**命中测试**把这块矩形
+      // 整组判给覆盖层。不必为它出图——自绘画在那儿也会被原生子窗口盖住。
+      // 藏起来时**不进树**：否则它会继续吞掉那块矩形里的点击。
+      self.tree.add(overlay_widget());
+    }
     self.tree.layout(viewport);
 
     let mut quads = Vec::new();
@@ -406,6 +431,14 @@ impl Demo {
         shaper,
         HUD_HELP_ID,
         &help,
+        scale_factor,
+      );
+      push_panel_quads(
+        &mut quads,
+        &self.tree,
+        shaper,
+        HUD_OVERLAY_BUTTON_ID,
+        &button_lines,
         scale_factor,
       );
     }
@@ -631,7 +664,50 @@ fn on_startup(app: &mut App) {
 }
 
 fn on_event(app: &mut App, event: &Event) {
+  // 覆盖层那个按钮先判：点了它就**不再往下派发**——否则「隐藏覆盖层」这一下会顺手在远处挖掉
+  // 一个方块（面板开着时本来也轮不到世界，这里只是把这条说死，顺带把状态同步出去）。
+  if toggle_overlay(app, event) {
+    return;
+  }
   app.with_state::<Demo, _>(|demo, cx| demo.handle_event(cx, event));
+}
+
+/// 覆盖层开关：点在按钮上就翻转 [`Demo::overlay_visible`]，并把原生子窗口的可见性同步过去。
+///
+/// 判据与 [`ui_owns_click`] 同源——**面板开着 + 命中那个 id**。按钮只在面板开着时进树，而面板关着
+/// 时光标是锁定的（压根没有「指针在哪」这回事），所以这一条天然自洽；也正因为它认的是**具体 id**
+/// 而不是「落在任意 Widget 上」，准星照旧不吞点击。
+///
+/// 用 `set_visible` 而不是 `close`：句柄留着，按钮才能再把它显出来。
+fn toggle_overlay(app: &mut App, event: &Event) -> bool {
+  if !matches!(
+    event,
+    Event::MouseButton {
+      button: MouseButton::Left,
+      pressed: true,
+      ..
+    }
+  ) {
+    return false;
+  }
+
+  let Some((clicked, visible)) = app.with_state::<Demo, _>(|demo, _| {
+    if !demo.panel_open || demo.tree.hit_test(demo.cursor) != Some(HUD_OVERLAY_BUTTON_ID) {
+      return (false, demo.overlay_visible);
+    }
+    demo.overlay_visible = !demo.overlay_visible;
+    (true, demo.overlay_visible)
+  }) else {
+    return false;
+  };
+  if !clicked {
+    return false;
+  }
+
+  if let Some(view) = app.webview(WindowLabel::MAIN, OVERLAY_ID) {
+    view.set_visible(visible);
+  }
+  true
 }
 
 fn on_frame(app: &mut App, frame: Frame) {
@@ -672,6 +748,18 @@ fn help_lines() -> Vec<String> {
     "Shift 加速 / 左键破坏 / 右键放置".to_owned(),
     "Tab 开关面板 / Esc 退出 / 鼠标转向".to_owned(),
   ]
+}
+
+/// 覆盖层开关按钮的那一行字。
+///
+/// 覆盖层是原生子窗口，页面里关不掉自己（页面 → 宿主那条线还没铺），所以「藏起来」这个动作只能由
+/// 宿主发起。字面就把当前状态与点下去的后果写清楚，省得去猜。
+fn overlay_button_lines(visible: bool) -> Vec<String> {
+  vec![if visible {
+    "覆盖层：开（点这里隐藏）".to_owned()
+  } else {
+    "覆盖层：关（点这里显示）".to_owned()
+  }]
 }
 
 /// UI 是否该独占**连续控制**（键盘轴值与视角转向）。
@@ -899,6 +987,43 @@ mod tests {
       demo.tree.hit_test(inside),
       Some(HUD_OVERLAY_ID),
       "这块矩形归覆盖层"
+    );
+  }
+
+  /// 覆盖层开关：面板开着时按钮才进树、才点得到；藏起来后那块矩形**退出** `UiTree`（不再吞点击），
+  /// 而按钮还在——不然就再也显不回来了。
+  #[test]
+  fn the_overlay_button_hides_the_overlay_rect_and_stays_clickable() {
+    let Some((mut demo, mut shaper)) = demo_with_font() else {
+      return;
+    };
+    let viewport = LogicalSize::new(1000.0, 600.0);
+
+    demo.build_hud(Some(&mut shaper), viewport, 1.0, 0);
+    assert!(
+      demo.tree.rect_of(HUD_OVERLAY_BUTTON_ID).is_none(),
+      "面板没开就没有按钮（那时光标是锁的，点了也没有意义）"
+    );
+
+    demo.panel_open = true;
+    demo.build_hud(Some(&mut shaper), viewport, 1.0, 0);
+    let button = demo
+      .tree
+      .rect_of(HUD_OVERLAY_BUTTON_ID)
+      .expect("面板开了按钮进树");
+    demo.cursor = LogicalPosition::new(button.x + 1.0, button.y + 1.0);
+    assert_eq!(demo.tree.hit_test(demo.cursor), Some(HUD_OVERLAY_BUTTON_ID));
+    assert!(demo.tree.rect_of(HUD_OVERLAY_ID).is_some(), "默认是显示的");
+
+    demo.overlay_visible = false;
+    demo.build_hud(Some(&mut shaper), viewport, 1.0, 0);
+    assert!(
+      demo.tree.rect_of(HUD_OVERLAY_ID).is_none(),
+      "藏起来后那块矩形不该再进树"
+    );
+    assert!(
+      demo.tree.rect_of(HUD_OVERLAY_BUTTON_ID).is_some(),
+      "按钮还在，好点回来"
     );
   }
 }
