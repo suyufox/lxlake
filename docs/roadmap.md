@@ -202,15 +202,23 @@ Widget 树）、`ui::text`（ab_glyph + `data/fonts` 下的 OFL CJK 字体：按
 追加在 main pass 之后）、`lxlake-demo` 的接线（左上角信息面板、屏幕中央准星、Tab 调试面板与输入
 闸口）。
 
-按包验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 146 项、`--features render` 161 项、
-`cargo test -p lxlake-demo` 4 项全绿；`clippy --all-targets -D warnings` 与 `cargo fmt --all --check`
-无告警；`cargo build -p lxlake-editor` 的依赖图里 wgpu / naga / bytemuck 仍是 **0 次**（排版只用
-普通依赖 `ab_glyph`，不受 `render` 门控）。剩下的是**实机看一眼** HUD，以及切 4 的 wry 覆盖层。
+**切 4 也已落位**：`capability::webview` 的接口层（`OverlaySpec` / `WebViewHandle` / 能力查询，常编译）
+与 `webview-wry` 后端——**只做 Windows / WebView2**，其余平台 fail-closed，所以 linux 不引 webkit2gtk、
+android 不拉东西；装配面是 `Builder::webview`，摆位复用同一块 `.overlay()` 的 `Widget`，于是覆盖层与
+自绘 UI 的**命中测试判据是同一条**（见[架构](architecture.md)的「webview 双线」）。demo 上就是右下角
+一块 320×200 的 wry 子窗口。
+
+按包验证（**不跑 `--workspace`**）：`cargo test -p lxlake` 155 项、`--features render` 170 项、
+`--features webview-wry` 155 项、`cargo test -p lxlake-demo` 5 项全绿；`clippy --all-targets -D warnings`
+与 `cargo fmt --all --check` 无告警；`cargo build -p lxlake-editor` 的依赖图里 wgpu / naga / bytemuck
+仍是 **0 次**（排版只用普通依赖 `ab_glyph`，不受 `render` 门控；wry 同样不在 editor 的图里）。剩下的是
+**实机看一眼** HUD 与覆盖层：覆盖层在最上（Tab 面板也盖不住它）、矩形内点击不挖方块也不转视角、
+resize 与 DPI 变化后仍锚在右下角。
 
 同一轮还顺手做了**框架主线的重构**：`Builder` 装配面、窗口身份（标签取窗与多窗口）、统一路径层、
 日志与异步运行时、命令总线，并为 android 铺好入口（接入已落地、类型检查已过，打包与真机在后）。
 它不被里程碑的交付项绑定，但把堆在 demo `main.rs` 里的接线收进了运行时——形状见[架构](architecture.md)
-的「应用装配」。M3 因此只剩切 4。
+的「应用装配」。M3 的**代码**因此全部落位，只剩实机验收。
 
 ### 做
 
@@ -271,11 +279,12 @@ DPI 约掉），所以 DPI 只影响字形光栅化。
 
 ## webview 双线（独立于空岛）
 
-webview 不被空岛进度绑定，另起一条线。它与空岛的**唯一交汇点是 M0 的 pump 钩子接口**：
+webview 不被空岛进度绑定，另起一条线。它与空岛的**交汇点**是 M0 的 pump 钩子接口（wry 那一半后来
+实测用不上，见下）：
 
 1. M0 交付接口（外部事件源注册 + 帧边界外唤醒），不含 wry 实现
 2. **已核对**：拿这个接口核对能否满足 wry / CEF 约 10ms 泵的语义——结论是**够用，`runtime` 不用改**（见下）
-3. 之后才是：wry 覆盖层 → CEF 纹理层
+3. 之后才是：wry 覆盖层（**已落位**，仅 Windows）→ CEF 纹理层
 
 ### 钩子核对结论（已做）
 
@@ -283,6 +292,10 @@ webview 不被空岛进度绑定，另起一条线。它与空岛的**唯一交�
 最早者与下一帧时间取小，据此设 `ControlFlow::WaitUntil` → 醒来后 `about_to_wait` **先泵源、再出帧**；
 从别的线程被 `Wakeup` 叫醒时则补一帧并顺带泵一遍源。于是「比帧更细的泵」成立：帧是 16.6ms 时，
 源仍会按自己声明的 ~10ms 被泵到。**wry 与 CEF 都能直接接，不需要改动运行时主干。**
+
+**实测修正（wry 接上后）**：**wry 0.57 没有 `pump` 接口**——覆盖层的活跑在宿主消息循环里，`winit`
+的事件循环本身就是它的泵。所以**覆盖层这一半用不上外部事件源钩子**，钩子的受力点在 CEF：离屏渲染
+要按自己的节奏泵 message loop，那套 `EventSource` 语义到那时才真正被检验。
 
 两条留给实现者的契约（写进了 `runtime/pump.rs` 的文档，且已被单测钉住）：
 
@@ -298,12 +311,12 @@ CEF 需要先自建 vcpkg overlay port（下载官方预编译分发 + 校验和
 
 「2D 覆盖层」在这个项目里分两种，开工点不同：
 
-| 东西                       | 开工点                          | 说明                                                        |
-| -------------------------- | ------------------------------- | ----------------------------------------------------------- |
-| **自绘 UI**（HUD / 2D 层） | M3                              | 「自绘 UI 第一刀」，不依赖 webview 线                       |
-| **wry 原生覆盖层**         | M3 第一次接上                   | 与自绘 UI 同时出现，要的就是验证两者的 z 序与输入穿透关系   |
-| **CEF 纹理层**             | wry 之后，最晚                  | 先有 vcpkg overlay port；`cef-ffmpeg` 另立发行物            |
-| **pump 语义核对**（前置）  | **不绑里程碑，M2 之后随时可做** | 拿 M0 的钩子核对 wry / CEF 约 10ms 泵；不够就先改 `runtime` |
+| 东西                       | 开工点                          | 说明                                                                                                   |
+| -------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **自绘 UI**（HUD / 2D 层） | M3                              | 「自绘 UI 第一刀」，不依赖 webview 线                                                                  |
+| **wry 原生覆盖层**         | **M3 已落位**（仅 Windows）     | 与自绘 UI 同时出现，要的就是验证两者的 z 序与输入穿透关系；wry 0.57 无 `pump` 接口，宿主消息循环即其泵 |
+| **CEF 纹理层**             | wry 之后，最晚                  | 先有 vcpkg overlay port；`cef-ffmpeg` 另立发行物                                                       |
+| **pump 语义核对**（前置）  | **不绑里程碑，M2 之后随时可做** | 拿 M0 的钩子核对 wry / CEF 约 10ms 泵；不够就先改 `runtime`                                            |
 
 也就是说：覆盖层本身在 M3 开工，但**它前面那道工序（拿 pump 钩子核对语义）可以提前**，而且提前做代价
 最低——等 wry 真接上再发现钩子语义不够，改的就是运行时主干了。

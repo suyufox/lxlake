@@ -71,6 +71,24 @@ cargo ndk -t arm64-v8a check -p lxlake-demo --lib   # android 无 bin，打包�
 
 apple 平台的 target 需要时再加；C 依赖清单不含 apple（见[架构](architecture.md)）。
 
+## webview 覆盖层前置（Windows）
+
+覆盖层走 `webview-wry` 特性。该特性**只在 Windows 目标上成立**（wry 的 Windows 后端 = WebView2）；
+其余 target 上这个特性不拉任何依赖，`create_overlay` 在运行期 fail-closed 返回 `Unsupported`——
+linux 因此**不需要** webkit2gtk 的系统依赖，android 也不拉东西。
+
+```
+# demo 的 Cargo.toml 已把 webview-wry 列进 features，直接跑就带上覆盖层
+cargo run -p lxlake-demo
+
+# lxlake 本体单独验证覆盖层
+cargo test -p lxlake --features webview-wry
+```
+
+运行前置是 **WebView2 Runtime（Evergreen）**：Windows 11 自带，Win10 需装一次官方
+Evergreen Bootstrapper。它由机器共享、**不随发行物出 dll**，与 `native/` 下那批 C 依赖不是一回事
+（wry 经 `webview2-com` 调系统的 loader）。
+
 ## 缺失项
 
 | 项               | 现状                                                                        | 处置                                 |

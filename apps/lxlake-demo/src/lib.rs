@@ -9,6 +9,9 @@
 //! 三者都来自引擎，本模块只做「接线」——把事件翻译成意图、把意图解析成命令、把流式产出交给
 //! 渲染器、把排版交给 UI，不实现任何算法。
 //!
+//! M3 收尾再加上**原生覆盖层**：窗口右下角一块 wry（WebView2）子窗口，矩形与自绘共用同一份
+//! 摆位数据（见 [`overlay_widget`]）——覆盖层永远浮在画面与自绘 UI 之上，不参与 z 序与裁剪。
+//!
 //! 键位是一张**键位表**（数据，不是散落的 `match`），链路见 `docs/roadmap.md` 的
 //! 「输入与模拟的分界」：
 //!
@@ -19,6 +22,7 @@
 //! ```
 
 use lxlake::camera::{CameraInput, FlyCamera};
+use lxlake::capability::webview::{OverlayId, OverlaySpec, WebViewConfig};
 use lxlake::core::command::{Command, Intent};
 use lxlake::core::event::Event;
 use lxlake::core::geometry::{LogicalPosition, LogicalSize};
@@ -90,12 +94,44 @@ const CROSSHAIR_COLOR: [u8; 4] = [255, 255, 255, 200];
 /// 帧率的平滑系数：HUD 上要连续变化，瞬时值（`1 / delta`）跳得没法看。
 const FPS_SMOOTHING: f32 = 0.05;
 
-/// HUD 里那四个 Widget 的身份。集中在这里，因为布局与出图都按它们记账。
+/// HUD 里那几个 Widget 的身份（含覆盖层那块矩形）。集中在这里，因为布局与出图都按它们记账。
 const HUD_PANEL_ID: UiId = UiId(1);
 const HUD_CROSSHAIR_H_ID: UiId = UiId(2);
 const HUD_CROSSHAIR_V_ID: UiId = UiId(3);
 /// 调试面板（Tab 开关）。**是模态的**：开着的时候键盘与视角都归它（见 `ui_owns_control`）。
 const HUD_HELP_ID: UiId = UiId(4);
+/// 覆盖层那块矩形在 `UiTree` 里的身份（它本身是原生子窗口，进树只为命中测试）。
+const HUD_OVERLAY_ID: UiId = UiId(5);
+
+/// 覆盖层的运行期身份：`OverlayId` 与 `UiId` 分开，因为前者是运行时的记账键、后者是布局的键。
+const OVERLAY_ID: OverlayId = OverlayId(1);
+
+/// 覆盖层的尺寸与它到窗口右下角的距离（逻辑像素）。
+const OVERLAY_SIZE: LogicalSize = LogicalSize::new(320.0, 200.0);
+const OVERLAY_MARGIN: [f64; 2] = [-16.0, -16.0];
+
+/// 覆盖层里那段内联 HTML：不引资产目录，一段静态说明 + 醒目底色（一眼看出层级）。
+const OVERLAY_HTML: &str = r#"<!doctype html>
+<meta charset="utf-8">
+<body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
+  background:#d9480f;color:#fff8f1;font:14px/1.7 'Segoe UI',system-ui,sans-serif;text-align:center">
+  <div>
+    <b>wry 覆盖层</b><br>
+    原生子窗口，永远浮在画面与自绘 UI 之上<br>
+    矩形与右下角那块自绘 Widget 共用一份摆位
+  </div>
+</body>"#;
+
+/// 覆盖层那块矩形。**只此一份**：装配层拿它建原生子窗口（见 `app`），HUD 拿它进 [`UiTree`]
+/// （见 [`Demo::build_hud`]）——摆位数据共用一份，命中测试因此把这块矩形整组判给覆盖层。
+///
+/// `.overlay()` 打的是「覆盖层」这个标记，`OverlaySpec::new` 也会打一次（幂等）：两处要的是
+/// **同一个** Widget，不是两份长得一样的。
+fn overlay_widget() -> Widget {
+  Widget::new(HUD_OVERLAY_ID, Anchor::BottomRight, OVERLAY_SIZE)
+    .offset(OVERLAY_MARGIN)
+    .overlay()
+}
 
 /// 应用声明的默认键位表：`输入源 → 意图`。
 ///
@@ -344,6 +380,9 @@ impl Demo {
         panel_size(shaper, &help, scale_factor),
       ));
     }
+    // 覆盖层那块矩形也要进树：它是原生子窗口（永远在最上），进树是为了**命中测试**把这块矩形
+    // 整组判给覆盖层。不必为它出图——自绘画在那儿也会被原生子窗口盖住。
+    self.tree.add(overlay_widget());
     self.tree.layout(viewport);
 
     let mut quads = Vec::new();
@@ -717,6 +756,12 @@ fn app() -> lxlake::Builder {
     .workers(Demo::worker_count())
     .font_path(HUD_FONT)
     .renderer(|window| Renderer::new(window, &ATLAS_TILES))
+    // 覆盖层只声明「摆在哪、装什么」：父窗口句柄、视口、矩形都由运行时算（见 `Builder::webview`）。
+    .webview(OverlaySpec::new(
+      OVERLAY_ID,
+      overlay_widget(),
+      WebViewConfig::html(OVERLAY_HTML),
+    ))
     .manage(Demo::new())
     .on_startup(on_startup)
     .on_event(on_event)
@@ -827,5 +872,33 @@ mod tests {
       "帮助面板后加、压在正中，所以正中那一下是它的"
     );
     assert!(ui_owns_click(demo.panel_open, &demo.tree, center));
+  }
+
+  /// 覆盖层那块矩形进了 HUD 的树，命中测试因此把它判给覆盖层——「摆位数据共用一份」的可机检形式。
+  ///
+  /// 装配层建原生子窗口用的矩形由引擎按同一个 [`overlay_widget`] 算出（`ui::place`），所以这里
+  /// 钉住的是「同一份数据」这件事，不是「两块长得一样的矩形」。
+  #[test]
+  fn the_overlay_rect_belongs_to_the_overlay_in_the_hit_test() {
+    let Some((mut demo, mut shaper)) = demo_with_font() else {
+      return;
+    };
+    let viewport = LogicalSize::new(1000.0, 600.0);
+
+    demo.build_hud(Some(&mut shaper), viewport, 1.0, 0);
+    let rect = demo.tree.rect_of(HUD_OVERLAY_ID).expect("覆盖层进了树");
+    let inside = LogicalPosition::new(rect.x + 1.0, rect.y + 1.0);
+
+    assert_eq!(rect.width, OVERLAY_SIZE.width);
+    assert_eq!(rect.height, OVERLAY_SIZE.height);
+    assert!(
+      rect.x + rect.width <= viewport.width && rect.y + rect.height <= viewport.height,
+      "它该在视口里（右下角内缩）：{rect:?}"
+    );
+    assert_eq!(
+      demo.tree.hit_test(inside),
+      Some(HUD_OVERLAY_ID),
+      "这块矩形归覆盖层"
+    );
   }
 }

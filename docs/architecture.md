@@ -318,10 +318,10 @@ M2 把这条分界落成了三层（`docs/roadmap.md` 的「输入与模拟的�
 
 两种呈现形态是**平台限制，不是设计选择**：
 
-| 形态     | 机制             | 落位                            | 后端 |
-| -------- | ---------------- | ------------------------------- | ---- |
-| 覆盖层   | 原生子窗口       | `platform` 层，经 `Widget` 摆位 | wry  |
-| 纹理模式 | 离屏成纹理再绘制 | `capability` 与 `render` 的交界 | CEF  |
+| 形态     | 机制             | 落位                                          | 后端 |
+| -------- | ---------------- | --------------------------------------------- | ---- |
+| 覆盖层   | 原生子窗口       | `capability` 层，父窗口经 `raw-window-handle` | wry  |
+| 纹理模式 | 离屏成纹理再绘制 | `capability` 与 `render` 的交界               | CEF  |
 
 - 覆盖层与契约层的 overlays 同构，永远浮在最上、不可裁剪，**不参与 z 序与裁剪**
 - 纹理模式可参与 z 序与裁剪，取帧 → `Renderer::import_texture`
@@ -329,9 +329,24 @@ M2 把这条分界落成了三层（`docs/roadmap.md` 的「输入与模拟的�
 - **沙箱默认 fail-closed**：不允许以 `--no-sandbox` 交付，环境不支持就拒绝创建
 - **GPL 隔离**：`cef-ffmpeg` 单独特性、单独发行物，默认发行物不含任何 GPL 代码
 
-### 硬前置
+**覆盖层已落位**（M3 切 4）：
 
-运行时必须先有**「外部事件源 / pump」钩子**：wry 与 CEF 都要求外部事件源约每 ~10ms 泵一次，而运行时只有重绘节奏。这条不补，webview 集成一定变成 hack。该钩子由 M0 交付**接口**（见[路线图](roadmap.md)）。
+- 接口层在 `capability::webview`，**常编译**（`OverlaySpec` / `WebViewHandle` / `Config` / 能力查询），
+  后端关在 `webview-wry` 特性之后
+- **只做 Windows**（WebView2）。其余平台 `create_overlay` 返回 `Unsupported`——于是 linux 不必引
+  webkit2gtk 的系统依赖，android 也一个字节都不拉。接口层不摆平台判据，判据在后端里
+- 父窗口**不下沉到 `platform`**：装配期只声明「摆在哪、装什么」（`Builder::webview`），视口与矩形由
+  运行时在**建窗时**算（`ui::place` 与自绘共用同一份 Widget 数据），句柄经 `raw-window-handle` 递给
+  `build_as_child`。覆盖层因此与渲染器同构：**按窗惰建、resize / DPI 重算、摘窗释放、退出清空**
+
+### 硬前置：pump 钩子（wry 用不上，留给 CEF）
+
+webview 集成要先有**「外部事件源 / pump」钩子**，否则一定变成 hack。该钩子由 M0 交付**接口**
+（见[路线图](roadmap.md)）。
+
+接上 wry 之后口径要修正一处：**wry 0.57 没有 `pump` 接口**。WebView2 的活跑在宿主消息循环里，
+`winit` 的事件循环本身就是它的泵，所以**覆盖层这一半用不上外部事件源钩子**。钩子的受力点在 CEF：
+离屏渲染要按自己的节奏泵 message loop，那套 `EventSource` 语义到那时才真正被检验。
 
 ## 编辑器
 
@@ -370,5 +385,5 @@ M2 把这条分界落成了三层（`docs/roadmap.md` 的「输入与模拟的�
 
 `d:\workspace\luoxinglake` 是同一方向的早期尝试，本项目只参考其代码与契约设计，不复用其仓库组织：
 
-- **可继承**：webview 的 `default = []` 纯接口 + feature 隔离、覆盖层/纹理二分、`Capabilities` 能力查询、`SandboxPolicy` fail-closed、`WebView::pump` 的宿主侧要求
+- **可继承**：webview 的 `default = []` 纯接口 + feature 隔离、覆盖层/纹理二分、`Capabilities` 能力查询、`SandboxPolicy` fail-closed、宿主侧 pump 的接口要求（落到 `EventSource`，留给 CEF；wry 用不上，见上）
 - **要避开**：一次性批量建壳（34 个 crate）、按概念拆包、把依赖目录做成一张需要人工维护的登记表
